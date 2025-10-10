@@ -195,9 +195,16 @@ SFREQ = 100
 
 # %%
 class DatasetWrapper(BaseDataset):
-    def __init__(self, dataset: EEGWindowsDataset, crop_size_samples: int, seed=None):
+    def __init__(
+        self,
+        dataset: EEGWindowsDataset,
+        crop_size_samples: int,
+        target_name: str = "externalizing",
+        seed=None,
+    ):
         self.dataset = dataset
         self.crop_size_samples = crop_size_samples
+        self.target_name = target_name
         self.rng = random.Random(seed)
 
     def __len__(self):
@@ -206,9 +213,8 @@ class DatasetWrapper(BaseDataset):
     def __getitem__(self, index):
         X, _, crop_inds = self.dataset[index]
 
-        # P-factor label:
-        p_factor = self.dataset.description["p_factor"]
-        p_factor = float(p_factor)
+        target = self.dataset.description[self.target_name]
+        target = float(target)
 
         # Additional information:
         infos = {
@@ -228,7 +234,7 @@ class DatasetWrapper(BaseDataset):
         i_stop = i_start + self.crop_size_samples
         X = X[:, start_offset : start_offset + self.crop_size_samples]
 
-        return X, p_factor, (i_window_in_trial, i_start, i_stop), infos
+        return X, target, (i_window_in_trial, i_start, i_stop), infos
 
 
 # %% [markdown]
