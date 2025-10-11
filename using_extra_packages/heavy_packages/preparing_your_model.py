@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # # --------------------------------------------------------------------------
-# # This submission file shows how to include extra python packages in your submission
+# # This submission file shows how to include extra Python packages in your submission
 # # and how to use them in your submission file.
 # #
 # # If you need packages that require C++ compilation, follow the tutorial in this file
-# # in this repository folder heavy_packages.
+# # in this repository folder, heavy_packages.
 # # --------------------------------------------------------------------------
-# # To include extra python packages, you need to:
-# # 1) Create a new fresh environment based on the based environment.yml file
+# # To include extra Python packages, you need to:
+# # 1) Create a new, fresh environment based on the environment.yml file
 # #    conda env create -f environment.yml
 # #    conda activate codabench-env
 # # 2) Transform your model to a TorchScript file (.pt) using this file
