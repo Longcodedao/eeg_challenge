@@ -96,13 +96,10 @@ class Submission:
 
     def get_model_challenge_1(self):
         model_challenge1 = ModelWithExtraDeps().to(self.device)
-        # load from the current directory (/app/input/ is where the file resides on Codabench)
-        # model_challenge1.load_state_dict(torch.load("os.path.join(os.path.dirname(__file__)", map_location=self.device))
         return model_challenge1
 
     def get_model_challenge_2(self):
         model_challenge2 = EEGNeX(
             n_chans=129, n_outputs=1, n_times=int(2 * self.sfreq)
         ).to(self.device)
-        # model_challenge2.load_state_dict(torch.load("/app/input/weights_challenge_2.pt", map_location=self.device))
         return model_challenge2

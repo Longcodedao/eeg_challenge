@@ -5,6 +5,8 @@
 # #
 # # If you need packages that require C++ compilation, follow the tutorial in this file
 # # in this repository folder, heavy_packages.
+# # This is just a example of how to prepare your model with extra packages.
+# # the model here is just a dummy model!
 # # --------------------------------------------------------------------------
 # # To include extra Python packages, you need to:
 # # 1) Create a new, fresh environment based on the environment.yml file
