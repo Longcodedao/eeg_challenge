@@ -14,15 +14,16 @@
 # # in this repository folder.
 # # --------------------------------------------------------------------------
 # # To include extra python packages, you need to:
-# # 0) Create a new fresh environment based on the based environment.yml file
-# #    conda env create -f environment.yml
-# #    conda activate codabench-env
+# # 0) Create a new fresh environment based on the based codabench environment.
+# #    uv the environment you will use to install the packages.
+# #    You can do this by running:
+# #    uv sync 
 # # 1) Create a folder named `python_packages` in the same directory as this
 # #    submission file.
 # # 2) Install the packages you need in that folder. You can do this by
 # #    running pip install with target in your
 # #    terminal.
-# #    pip install --target submission/python_packages <package_name>
+# #    uv pip install --target PATH <package_name>
 # # 3) Test locally that your submission file works with the extra packages.
 # #    You can do this by running `python submission.py` in your terminal.
 # #    Make sure you are in the same directory as this submission file.
@@ -86,3 +87,9 @@ class Submission:
         ).to(self.device)
         # model_challenge2.load_state_dict(torch.load("/app/input/weights_challenge_2.pt", map_location=self.device))
         return model_challenge2
+
+
+model_challenge1 = ModelWithExtraDeps()
+zeros = torch.zeros((1, 129, 200))
+out = model_challenge1(zeros)
+print("Output shape of model with extra dependencies:", out.shape)

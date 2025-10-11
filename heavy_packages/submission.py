@@ -3,18 +3,18 @@ from pathlib import Path
 from braindecode.models import EEGNeX
 import torch
 
-def resolve_path(name="model_with_extra_deps"):
-    if Path(f"/app/input/res/{name}.pt").exists():
-        return f"/app/input/res/{name}.pt"
-    elif Path(f"/app/input/{name}.pt").exists():
-        return f"/app/input/{name}.pt"
-    elif Path(f"{name}.pt").exists():
-        return f"{name}.pt"
-    elif Path(__file__).parent.joinpath(f"{name}.pt").exists():
-        return str(Path(__file__).parent.joinpath(f"{name}.pt"))
+def resolve_path(name="model_file_name"):
+    if Path(f"/app/input/res/{name}").exists():
+        return f"/app/input/res/{name}"
+    elif Path(f"/app/input/{name}").exists():
+        return f"/app/input/{name}"
+    elif Path(f"{name}").exists():
+        return f"{name}"
+    elif Path(__file__).parent.joinpath(f"{name}").exists():
+        return str(Path(__file__).parent.joinpath(f"{name}"))
     else:
         raise FileNotFoundError(
-            f"Could not find {name}.pt in /app/input/res/ or /app/input/ or current directory"
+            f"Could not find {name} in /app/input/res/ or /app/input/ or current directory"
         )
 
 class Submission:
