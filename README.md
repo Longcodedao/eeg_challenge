@@ -45,6 +45,9 @@ This repository contains start kits for the [EEG Foundation challenges](https://
 
 - **`requirements.txt`** - Python dependencies needed to run the notebooks
 
+- **`submission.py`** - Example of local inference to allow you to do your tests.
+
+
 ### Advanced Examples (not_ready_yet/)
 
 - **`challenge_2_self_supervised.ipynb`** - Advanced self-supervised learning approach
