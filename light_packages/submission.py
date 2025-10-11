@@ -7,26 +7,39 @@
 # # This TUTORIAL WILL ONLY WORK WITH LINUX!
 # #
 # # This is type of instalation is suitable for small packages that do not
-# # require compilation, exemple torch_geometric.
+# # require compilation, example torch_geometric.
 # #
 # # If you need to install large packages or packages
 # # that require C++ compilation, follow the tutorial in preparing_your_model.py
 # # in this repository folder.
 # # --------------------------------------------------------------------------
+# # IMPORTANT: Make sure that the extra packages you include are compatible
+# # with the python version and the packages already installed in the
+# # codabench environment. You can check the codabench environment by
+# # running `uv uv` in the terminal after installing uv.
+# # --------------------------------------------------------------------------
+# # The codabench environment has python 3.10 and the following packages
+# # already installed: github.com/eeg2025/startkit
+# ##########################################################################
+# #
 # # To include extra python packages, you need to:
 # # 0) Create a new fresh environment based on the based codabench environment.
 # #    uv the environment you will use to install the packages.
 # #    You can do this by running:
+# #    cd codalab-env
 # #    uv sync 
 # # 1) Create a folder named `python_packages` in the same directory as this
 # #    submission file.
 # # 2) Install the packages you need in that folder. You can do this by
 # #    running pip install with target in your
 # #    terminal.
-# #    uv pip install --target PATH <package_name>
+# #    uv pip install --target PATH_FOR_YOUR_FOLDER/python_packages <package_name>
 # # 3) Test locally that your submission file works with the extra packages.
 # #    You can do this by running `python submission.py` in your terminal.
 # #    Make sure you are in the same directory as this submission file.
+# #    You will need to include the `python_packages` folder in your
+# #    PYTHONPATH to test it locally. Code to do this is included in the
+# #    `resolve_path` function below.
 # # 4) Zip the `python_packages` folder along with your submission file and
 # #    any other files you need (e.g. model weights) into a single zip
 # #    file.
