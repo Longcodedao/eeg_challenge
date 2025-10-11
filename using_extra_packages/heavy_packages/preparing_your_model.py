@@ -3,9 +3,8 @@
 # # This submission file shows how to include extra python packages in your submission
 # # and how to use them in your submission file.
 # #
-
-# # if you need packages that require C++ compilation, follow the tutorial in this file
-# # in this repository folder.
+# # If you need packages that require C++ compilation, follow the tutorial in this file
+# # in this repository folder heavy_packages.
 # # --------------------------------------------------------------------------
 # # To include extra python packages, you need to:
 # # 1) Create a new fresh environment based on the based environment.yml file

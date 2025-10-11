@@ -11,12 +11,12 @@
 # #
 # # If you need to install large packages or packages
 # # that require C++ compilation, follow the tutorial in preparing_your_model.py
-# # in this repository folder.
+# # in this repository folder heavy_packages.
 # # --------------------------------------------------------------------------
 # # IMPORTANT: Make sure that the extra packages you include are compatible
 # # with the Python version and the packages already installed in the
 # # codabench environment. You can check the Codabench environment by
-# # running `uv uv` in the terminal after installing uv.
+# # running `uv` in the terminal after installing uv.
 # # --------------------------------------------------------------------------
 # # The codabench environment has Python 3.10 and the following packages
 # # already installed: github.com/eeg2025/startkit
@@ -24,10 +24,11 @@
 # #
 # # To include extra Python packages, you need to:
 # # 0) Create a fresh environment based on the codabench environment.
-# #    uv the environment you will use to install the packages.
+# #    We recommend to use uv the environment you will use to install the packages.
 # #    You can do this by running:
 # #    cd codalab-env
 # #    uv sync 
+# #    uv activate
 # # 1) Create a folder named `python_packages` in the same directory as this
 # #    submission file.
 # # 2) Install the packages you need in that folder. You can do this by
@@ -43,7 +44,10 @@
 # # 4) Zip the `python_packages` folder along with your submission file and
 # #    any other files you need (e.g., model weights) into a single zip
 # #    file.
+# #    You can do this by running the following command in your terminal:
 # #    (cd PATH_FOR_YOUR_FOLDER && zip -r ../submission.zip .)
+# #    Only zip what is needed for your submission to run.
+# #    DO NOT zip the entire PROJECT or any unnecessary files.
 # # 5) Upload the zip file to Codabench.
 # #
 
@@ -73,6 +77,8 @@ def resolve_path(name="python_packages"):
 class ModelWithExtraDeps(torch.nn.Module):
     def __init__(self):
         super().__init__()
+        # EXAMPLE OF USING torch_geometric
+        # YOU CAN MODIFY THIS TO USE THE PACKAGE YOU INSTALLED
         import sys
         sys.path.append(resolve_path())
         import torch_geometric
@@ -100,9 +106,3 @@ class Submission:
         ).to(self.device)
         # model_challenge2.load_state_dict(torch.load("/app/input/weights_challenge_2.pt", map_location=self.device))
         return model_challenge2
-
-
-model_challenge1 = ModelWithExtraDeps()
-zeros = torch.zeros((1, 129, 200))
-out = model_challenge1(zeros)
-print("Output shape of model with extra dependencies:", out.shape)
