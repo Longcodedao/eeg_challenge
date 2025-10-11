@@ -2,7 +2,7 @@
 
 # EEG Foundation Challenge Start Kits
 
-This repository contains start kits for the [EEG Foundation challenges](https://eeg2025.github.io), a NeurIPS 2025 competition focused on advancing EEG decoding through cross-task transfer learning and psychopathology prediction.
+This repository contains start kits for the [EEG Foundation challenges](https://eeg2025.github.io), a NeurIPS 2025 competition focused on advancing EEG decoding through cross-task transfer learning and externalizing prediction.
 
 ## 🚀 Quick Start
 
@@ -13,12 +13,12 @@ This repository contains start kits for the [EEG Foundation challenges](https://
 
 **Goal:** Develop models that can effectively transfer knowledge from passive EEG tasks to active cognitive tasks.
 
-### Challenge 2: Predicting the P-factor from EEG
+### Challenge 2: Predicting the externalizing factor from EEG
 <a target="_blank" href="https://colab.research.google.com/github/eeg2025/startkit/blob/main/challenge_2.ipynb">
   <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Challenge 2 start-kit"/>
 </a>
 
-**Goal:** Predict the psychopathology factor (P-factor) from EEG recordings to enable objective mental health assessments.
+**Goal:** Predict the externalizing factor from EEG recordings to enable objective mental health assessments.
 
 ## 📁 Repository Structure
 
@@ -32,10 +32,10 @@ This repository contains start kits for the [EEG Foundation challenges](https://
 
 - **`challenge_1.py`** - Python script version of Challenge 1 notebook for easier integration
 
-- **`challenge_2.ipynb`** - Tutorial for Challenge 2: P-factor regression
-  - Understanding the P-factor regression task
+- **`challenge_2.ipynb`** - Tutorial for Challenge 2: Externalizing factor regression
+  - Understanding the externalizing factor regression task
   - Data loading and windowing strategies
-  - Model training for psychopathology prediction
+  - Model training for externalizing factor prediction
 
 - **`challenge_2.py`** - Python script version of Challenge 2 notebook for easier integration
 
@@ -49,7 +49,7 @@ This repository contains start kits for the [EEG Foundation challenges](https://
 
 - **`challenge_2_self_supervised.ipynb`** - Advanced self-supervised learning approach
   - Implementing Relative Positioning (RP) for unsupervised representation learning
-  - Fine-tuning for P-factor prediction
+  - Fine-tuning for externalizing factor prediction
   - PyTorch Lightning integration
   - *Note: This is an advanced example that may require additional setup*
 

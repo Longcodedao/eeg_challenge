@@ -2,11 +2,11 @@
 # <a target="_blank" href="https://colab.research.google.com/github/eeg2025/startkit/blob/main/challenge_2.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
 
 # %% [markdown]
-# # Challenge 2: Predicting the p-factor from EEG
+# # Challenge 2: Predicting the externalizing factor from EEG
 
-# The psychopathology factor (P-factor) is a widely recognized construct in mental health research, representing a common underlying dimension of psychopathology across various disorders.
-# Currently, the P-factor is often assessed using self-report questionnaires or clinician ratings, which can be subjective, prone to bias, and time-consuming.
-# **The Challenge 2** consists of developing a model to predict the P-factor from EEG recordings.
+# The externalizing factor is a widely recognized construct in mental health research, representing a common underlying dimension of psychopathology across various disorders.
+# Currently, the externalizing factor is often assessed using self-report questionnaires or clinician ratings, which can be subjective, prone to bias, and time-consuming.
+# **The Challenge 2** consists of developing a model to predict the externalizing factor from EEG recordings.
 
 # The challenge encourages learning physiologically meaningful signal representations and discovery of reproducible biomarkers.
 # Models of any size should emphasize robust, interpretable features that generalize across subjects,
@@ -20,7 +20,7 @@
 # %% [markdown]
 # ## Contents of this start kit
 
-# 0. Understand the P-factor regression task.
+# 0. Understand the externalizing factor regression task.
 # 1. Loading the data.
 # 2. Wrap the data into a PyTorch-compatible dataset.
 # 3. Define, train and save a model.
@@ -96,18 +96,17 @@ else:
 print(msg)
 
 # %% [markdown]
-# ## 0. Understanding the P-factor regression task.
+# ## 0. Understanding the externalizing factor regression task.
 #
-# The psychopathology factor (P-factor) is a widely recognized construct in mental health research, representing a common underlying dimension of psychopathology across various disorders.
-# The P-factor is thought to reflect the shared variance among different psychiatric conditions, suggesting that individuals with higher P-factor scores may be more vulnerable to a range of mental health issues.
-# Currently, the P-factor is often assessed using self-report questionnaires or clinician ratings, which can be subjective, prone to bias, and time-consuming.
-# In the dataset of this challenge, the P-factor was assessed using the Child Behavior Checklist (CBCL) [McElroy et al., (2017)](https://doi.org/10.1111/jcpp.12849).
+# The externalizing factor is a widely recognized construct in mental health research, representing a common underlying dimension of psychopathology across various disorders.
+# Currently, the externalizing factor is often assessed using self-report questionnaires or clinician ratings, which can be subjective, prone to bias, and time-consuming.
+# In the dataset of this challenge, the externalizing factor was assessed using the Child Behavior Checklist (CBCL) [McElroy et al., (2017)](https://doi.org/10.1111/jcpp.12849).
 
-# The goal of Challenge 2 is to develop a model to predict the P-factor from EEG recordings.
+# The goal of Challenge 2 is to develop a model to predict the externalizing factor from EEG recordings.
 # **The feasibility of using EEG data for this purpose is still an open question**.
-# The solution may involve finding meaningful representations of the EEG data that correlate with the P-factor scores.
+# The solution may involve finding meaningful representations of the EEG data that correlate with the externalizing factor scores.
 # The challenge encourages learning physiologically meaningful signal representations and discovery of reproducible biomarkers.
-# If contestants are successful in this task, it could pave the way for more objective and efficient assessments of the P-factor in clinical settings.
+# If contestants are successful in this task, it could pave the way for more objective and efficient assessments of the externalizing factor in clinical settings.
 
 # %% [markdown]
 # ## 1. Loading the data
@@ -190,7 +189,7 @@ SFREQ = 100
 
 # The class below defines a dataset wrapper that will extract 2-second windows,
 # uniformly sampled over the whole signal. In addition, it will add useful information
-# about the extracted windows, such as the p-factor, the subject or the task.
+# about the extracted windows, such as the externalizing factor, the subject or the task.
 
 
 # %%
