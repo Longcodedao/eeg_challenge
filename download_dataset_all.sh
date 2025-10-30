@@ -7,11 +7,36 @@
 # ---
 set -euo pipefail
 
+if ! command -v unzip &> /dev/null
+then
+    echo "--------------------------------------------------"
+    echo "Unzip is not found."
+    echo "Installing AWS CLI right now"
+    sudo apt-get install unzip
+fi
+
+
+if ! command -v aws &> /dev/null
+then
+    echo "--------------------------------------------------"
+    echo "AWS CLI (command 'aws') is not found."
+    echo "Installing AWS CLI right now"
+    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+    unzip awscliv2.zip
+    sudo ./aws/install
+
+    rm -rf awscliv2.zip
+    rm -rf ./aws
+fi
+
+echo "Starting download the dataset. This may take a while" 
+
+
 echo "--- Downloading HBN Data ---"
 
 # Define the storage path.
 # <<< CHANGE THIS if your mount point is different
-STORAGE_PATH="/data/storage"
+STORAGE_PATH="MyNeurIPSData"
 
 # Use quotes to handle paths with spaces or special characters
 DATA_OUTPUT_DIR="${STORAGE_PATH}/HBN_DATA_FULL"
