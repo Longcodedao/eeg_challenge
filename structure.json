@@ -4,7 +4,7 @@
     {
       "release_name": "R1_mini_L100_bdf",
       "zip_url": "https://sccn.ucsd.edu/download/eeg2025/R1_mini_L100_bdf.zip",
-      "temp_dir": "ds005505-bdf"
+      "temp_dir": "ds005505-bdf-mini"
     }
   ]
 }

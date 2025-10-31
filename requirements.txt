@@ -1,2 +1,5 @@
+# torch
+# torchvision
 eegdash>=0.3.8
 braindecode
+ipykernel
