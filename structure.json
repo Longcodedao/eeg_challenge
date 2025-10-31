@@ -2,59 +2,9 @@
   "output_dir": "HBN_DATA",
   "releases": [
     {
-      "release_name": "R1_L100_bdf",
-      "zip_url": "https://sccn.ucsd.edu/download/eeg2025/R1_L100_bdf.zip",
+      "release_name": "R1_mini_L100_bdf",
+      "zip_url": "https://sccn.ucsd.edu/download/eeg2025/R1_mini_L100_bdf.zip",
       "temp_dir": "ds005505-bdf"
-    },
-    {
-      "release_name": "R2_L100_bdf",
-      "zip_url": "https://sccn.ucsd.edu/download/eeg2025/R2_L100_bdf.zip",
-      "temp_dir": "ds005506-bdf"
-    },
-    {
-      "release_name": "R3_L100_bdf",
-      "zip_url": "https://sccn.ucsd.edu/download/eeg2025/R3_L100_bdf.zip",
-      "temp_dir": "ds005507-bdf"
-    },
-    {
-      "release_name": "R4_L100_bdf",
-      "zip_url": "https://sccn.ucsd.edu/download/eeg2025/R4_L100_bdf.zip",
-      "temp_dir": "ds005508-bdf"
-    },
-    {
-      "release_name": "R5_L100_bdf",
-      "zip_url": "https://sccn.ucsd.edu/download/eeg2025/R5_L100_bdf.zip",
-      "temp_dir": "ds005509-bdf"
-    },
-    {
-      "release_name": "R6_L100_bdf",
-      "zip_url": "https://sccn.ucsd.edu/download/eeg2025/R6_L100_bdf.zip",
-      "temp_dir": "ds005510-bdf"
-    },
-    {
-      "release_name": "R7_L100_bdf",
-      "zip_url": "https://sccn.ucsd.edu/download/eeg2025/R7_L100_bdf.zip",
-      "temp_dir": "ds005511-bdf"
-    },
-    {
-      "release_name": "R8_L100_bdf",
-      "zip_url": "https://sccn.ucsd.edu/download/eeg2025/R8_L100_bdf.zip",
-      "temp_dir": "ds005512-bdf"
-    },
-    {
-      "release_name": "R9_L100_bdf",
-      "zip_url": "https://sccn.ucsd.edu/download/eeg2025/R9_L100_bdf.zip",
-      "temp_dir": "ds005514-bdf"
-    },
-    {
-      "release_name": "R10_L100_bdf",
-      "zip_url": "https://sccn.ucsd.edu/download/eeg2025/R10_L100_bdf.zip",
-      "temp_dir": "ds005515-bdf"
-    },
-    {
-      "release_name": "R11_L100_bdf",
-      "zip_url": "https://sccn.ucsd.edu/download/eeg2025/R11_L100_bdf.zip",
-      "temp_dir": "ds005516-bdf"
     }
   ]
 }

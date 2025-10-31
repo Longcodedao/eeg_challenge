@@ -418,8 +418,8 @@ def run_pretraining():
     print("\n" + "="*50); print("STARTING STAGE 1: SELF-SUPERVISED PRE-TRAINING"); print("="*50)
     
     try:
-        participants_df = pd.read_csv(os.path.join(CFG.RAW_DATA_PATH, 'participants.tsv'), sep='\t')
-        all_subjects = participants_df['participant_id'].unique().tolist()
+        participants_df = pd.read_csv(os.pa'].unique().tolist()th.join(CFG.RAW_DATA_PATH, 'participants.tsv'), sep='\t')
+        all_subjects = participants_df['participant_id
     except Exception as e:
         print(f"FATAL ERROR loading participants.tsv: {e}"); raise
         
