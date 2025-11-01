@@ -1,0 +1,36 @@
+python pretrain.py \
+    --release R1 R2 R3 \
+    --mini \
+    --window-sec 6 \
+    --epochs 200 \
+    --batch-size 256 \
+    --lr 1e-4 \
+    --momentum-decay 0.995 \
+    --log-dir runs/ \
+    --checkpoint-dir checkpoints/ \
+    --checkpoint-interval 20 \
+    --num-workers 4
+
+    
+# Download dataset option
+# Download mini dataset (default)
+python download_dataset.py
+
+# Download full dataset
+python download_dataset.py --mode full
+
+# Custom configuration
+python download_dataset.py --mode mini --base-path . --data-folder MyEEGData_mini 
+python download_dataset.py --mode full --base-path . --data-folder MyEEGData_full 
+
+# Use custom JSON file
+python download_dataset.py --json-file my_custom_structure.json
+
+# Force redownload existing data
+python download_dataset.py --mode full --force-redownload
+
+# Quiet mode (no progress bars)
+python download_dataset.py --mode mini --quiet
+
+# Custom chunk size for slower connections
+python download_dataset.py --mode full --chunk-size 4096

@@ -285,4 +285,4 @@ class EnsembleCompetitionModel(nn.Module):
 
         return output
 
-print("my_model.py definitions complete and ready.")
+print("my_model.py definitions complete an7ad ready.")

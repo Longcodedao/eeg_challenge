@@ -5,35 +5,37 @@ from pathlib import Path
 from joblib import Parallel, delayed
 import matplotlib.pyplot as plt
 
-import mne
-from mne.io import read_raw_fif
 
-from eegdash.dataset.dataset import EEGChallengeDataset
-
-from braindecode.datasets import BaseDataset, BaseConcatDataset
-from braindecode.preprocessing import (
-    preprocess, Preprocessor, create_fixed_length_windows,
-    exponential_moving_standardize
+from build_dataset import (
+    load_task_datasets, preprocess_tasks, 
+    create_fixed_windows_from_preprocessed,
+    preprocess_all_releases
 )
+from braindecode.datasets import BaseDataset 
+from braindecode.preprocessing import create_fixed_length_windows
 
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
 import argparse
+import copy
+import time
+from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter 
 
 from model.eegmamba_jamba import EegMambaJEPA
 from model.loss import VICReg
 from model.mdn import MDNHead
-
-# Add convenience imports used in the notebook-style pipeline
-from braindecode.preprocessing import Preprocessor
-
+from augment import JEPAGPUAugment
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Pretraining dataset loader and utility for JEPA-style EEG pipeline")
 
     # Data and preprocessing
     parser.add_argument("--data-root", type=str, default="LOL_DATASET/HBN_DATA_FULL", help="Root directory where dataset will be cached/loaded")
-    parser.add_argument("--release", type=str, default="R1", help="Release to load (e.g., R1, R5)")
+    parser.add_argument("--release", nargs="+", default=[f"R{i}" for i in range(1, 12)], 
+                        help="Release to load (e.g., R1, R5)")
     parser.add_argument("--tasks", nargs="*", default=DEFAULT_TASKS, help="List of task names to load")
     parser.add_argument("--mini", action="store_true", help="Use mini dataset mode (faster for debugging)")
     parser.add_argument("--download", action="store_true", help="Allow dataset download if not present")
@@ -48,6 +50,23 @@ def parse_args():
     parser.add_argument("--patch-size", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
 
+    # Augmentation setting
+    parser.add_argument("--noise-std", type=float, default=0.01, help="Standard deviation of Gaussian noise for augmentation")
+    parser.add_argument("--time-flip-p", type=float, default=0.5, help="Probability of time-flipping augmentation")
+    parser.add_argument("--channel-dropout-p", type=float, default=0.1, help="Probability of channel dropout for augmentation")
+    parser.add_argument("--padding-percent", type=float, default=0.1, help="Percentage of padding for random cropping augmentation")
+
+    # Training setting
+    parser.add_argument("--epochs", type=int, default=10, help="Number of pretraining epochs")
+    parser.add_argument("--batch-size", type=int, default=64, help="Batch size for pretraining")
+    parser.add_argument("--num-workers", type=int, default=4, help="Number of workers for the batch loader")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for optimizer")
+    parser.add_argument("--momentum-decay", type=float, default=0.995, help="EMA momentum decay for target encoder")
+
+    parser.add_argument("--log-dir", type=str, default=".", help="Directory for TensorBoard logs")
+    parser.add_argument("--checkpoint", action = "store_true", help="Whether to load from a checkpoint")
+    parser.add_argument("--checkpoint-dir", type=str, default=".", help="Directory to save model checkpoints")
+    parser.add_argument("--checkpoint-interval", type=int, default=1, help="Epoch interval to save checkpoints")
     return parser.parse_args()
 
 
@@ -58,176 +77,292 @@ DEFAULT_TASKS = [
 ]
 
 
-def build_preprocessors(sfreq: float = 100.0):
-    """Return a list of Preprocessor callables similar to the notebook.
-
-    This is intentionally lightweight: the callables are compatible with
-    braindecode.preprocessing.preprocess when available. Users can pass
-    --no-preprocess to skip this step.
-    """
-    preprocessors = [
-        Preprocessor("pick", picks="eeg"),
-        Preprocessor("set_eeg_reference", ref_channels="average", ch_type="eeg"),
-        Preprocessor(
-            exponential_moving_standardize,
-            factor_new=1e-3,
-            init_block_size=int(10 * sfreq),
-        ),
-    ]
-    return preprocessors
-
-
-def load_task_datasets(cache_dir: str, tasks: list, 
-                       release: str = "R1", mini: bool = False, download: bool = False):
-    """Load per-task EEGChallengeDataset objects (one per task).
-
-    This mirrors the loop in the notebook: it returns a dict mapping task -> EEGChallengeDataset.
-    The datasets themselves contain recordings; further preprocessing / windowing is done separately.
-    """
-    data_total = {}
-    cache_dir = Path(cache_dir) / f"{release}_mini_L100_bdf" if mini else Path(cache_dir) / f"{release}_L100_bdf"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    for task in tasks:
-        print(f"Loading task: {task} (release={release}, mini={mini})")
-        ds = EEGChallengeDataset(
-            cache_dir=str(cache_dir),
-            mini=mini,
-            task=task,
-            download=download,
-            release=release,
-            n_jobs=-1,
-        )
-        data_total[task] = ds
-    return data_total
+def _collate_windows(batch):
+    # Each item from braindecode window dataset is typically a tuple (X, info)
+    xs = []
+    for item in batch:
+        if isinstance(item, (tuple, list)):
+            x = item[0]
+        else:
+            x = item
+        x = np.asarray(x, dtype=np.float32)
+        t = torch.from_numpy(x)
+        xs.append(t)
+    xs = torch.stack(xs, dim=0)  # (B, C, T) or (B, T, C)
+    # Ensure shape is (B, C, T)
+    if xs.ndim == 3 and xs.shape[1] < xs.shape[2]:
+        # heuristic: if second dim smaller than third, assume (B, C, T)
+        pass
+    elif xs.ndim == 3 and xs.shape[1] > xs.shape[2]:
+        xs = xs.permute(0, 2, 1)
+    return xs
 
 
-def preprocess_tasks(data_total: dict, out_dir: str, sfreq: float = 100.0, overwrite: bool = False):
-    """Apply braindecode preprocessing and save preprocessed files per-task.
+def _make_views(x_batch, augmentation):
+    # Create two simple stochastic views by adding noise
+    view1 = augmentation(x_batch)
+    view2 = augmentation(x_batch)
 
-    This mirrors the notebook steps: it will call braindecode.preprocessing.preprocess
-    and write out preprocessed FIF files under out_dir/<task>.
-    """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    return view1, view2 
 
-    preprocessors = build_preprocessors(sfreq=sfreq)
 
-    for task, ds in data_total.items():
-        task_dir = out_dir / task
-        task_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Preprocessing task {task} -> {task_dir} (n_subjects={len(ds.datasets)})")
+def train_one_epoch(model, loader, criterion, optimizer, device, 
+                    augmentation, epoch, writer, scheduler = None,
+                    ema_decay: float = None):
+    
+    model.train()
+    running_loss = 0.0
+    running_inv = 0.0
+    running_var = 0.0
+    running_cov = 0.0
+    running_grad_norm = 0.0
+    running_param_norm = 0.0
+    running_batch_time = 0.0
 
-        # Load raw files if not preloaded (keeps behavior similar to notebook)
-        for sub_ds in ds.datasets:
+    pbar = tqdm(enumerate(loader), total=len(loader), desc=f"Epoch {epoch}")
+    for step, xb in pbar:
+        t0 = time.time()
+
+        xb = xb.to(device)
+        x1, x2 = _make_views(xb, augmentation)
+        
+        # Forward pass (online encoder)
+        z1 = model(x1)
+        z2 = model(x2)
+
+        # Compute projector outputs and components for logging (projector is part of criterion)
+        with torch.no_grad():
+            # We use the projector directly so components match the final VICReg computation
+            z1p = criterion.projector(z1)
+            z2p = criterion.projector(z2)
+            inv_comp = float(criterion._invariance_loss(z1p, z2p).detach().cpu().item())
+            var_comp = float(criterion._variance_loss(z1p, z2p).detach().cpu().item())
+            cov_comp = float(criterion._covariance_loss(z1p, z2p).detach().cpu().item())
+
+        # Full VICReg loss (this runs projector internally too)
+        loss = criterion(z1, z2)
+
+        optimizer.zero_grad()
+        loss.backward()
+
+        # Gradient norm (L2) - handle None grads
+        total_norm_sq = 0.0
+        for p in list(model.parameters()) + list(criterion.parameters()):
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_norm_sq += param_norm.item() ** 2
+        grad_norm = total_norm_sq ** 0.5
+
+        # Parameter norm (L2)
+        total_param_sq = 0.0
+        for p in list(model.parameters()) + list(criterion.parameters()):
+            param_norm = p.data.norm(2)
+            total_param_sq += param_norm.item() ** 2
+        param_norm = total_param_sq ** 0.5
+
+        optimizer.step()
+
+        # EMA update for target encoder
+        if ema_decay is not None and model.target_model is not None:
             try:
-                if not getattr(sub_ds.raw, "preload", False):
-                    sub_ds.raw.load_data()
-            except Exception:
-                # Some dataset implementations might not provide raw or preload attribute.
-                pass
+                model.update_target(decay=ema_decay)
+            except Exception as e:
+                print(f"Warning: EMA update failed. {e}")
 
-        # Call braindecode preprocessing (may be heavy) - give user control via CLI
+        batch_time = time.time() - t0
+
+        # Accumulate stats
+        running_loss += loss.item()
+        running_inv += inv_comp
+        running_var += var_comp
+        running_cov += cov_comp
+        running_grad_norm += grad_norm
+        running_param_norm += param_norm
+        running_batch_time += batch_time
+
+        if (step + 1) % 10 == 0:
+            avg = running_loss / (step + 1)
+            pbar.set_postfix({'avg_loss': f"{avg:.4f}"})
+    
+    if scheduler is not None:
         try:
-            preproc = preprocess(ds, preprocessors, save_dir=task_dir, n_jobs=-1, overwrite=overwrite)
-            print(f"Saved preprocessed files for {task} (found {len(list(task_dir.rglob('*-raw.fif')))} files)")
-        except Exception as e:
-            print(f"Warning: preprocessing failed for {task}: {e}")
+            scheduler.step()
+        except Exception:
+            pass
+    
+    n_batches = max(1, len(loader))
 
+    # Compute averages
+    train_loss = running_loss / n_batches
+    avg_inv = running_inv / n_batches
+    avg_var = running_var / n_batches
+    avg_cov = running_cov / n_batches
+    avg_grad_norm = running_grad_norm / n_batches
+    avg_param_norm = running_param_norm / n_batches
+    avg_batch_time = running_batch_time / n_batches
 
-def create_fixed_windows_from_preprocessed(preproc_root: str, window_sec: float = 30.0, sfreq: float = 100.0, overlap_ratio: float = 0.5):
-    """Search preprocessed FIF files under preproc_root and create fixed-length windows dataset.
+    # Log to tensorboard
+    writer.add_scalar('train/loss', train_loss, epoch)
+    writer.add_scalar('train/invariance', avg_inv, epoch)
+    writer.add_scalar('train/variance', avg_var, epoch)
+    writer.add_scalar('train/covariance', avg_cov, epoch)
+    writer.add_scalar('train/grad_norm', avg_grad_norm, epoch)
+    writer.add_scalar('train/param_norm', avg_param_norm, epoch)
+    writer.add_scalar('train/batch_time', avg_batch_time, epoch)
 
-    Returns a braindecode BaseConcatDataset containing all windows.
-    """
-    preproc_root = Path(preproc_root)
-    raw_paths = sorted(preproc_root.rglob("*-raw.fif"))
-    print(f"Found {len(raw_paths)} preprocessed raw files under {preproc_root}")
-    all_preproc_datasets = []
-    for raw_path in raw_paths:
-        try:
-            raw = read_raw_fif(raw_path, preload=True, verbose=False)
-            description = {"task": raw_path.parent.name, "subject": raw_path.parent.name, "filename": raw_path.name}
-            all_preproc_datasets.append(BaseDataset(raw, description))
-        except Exception as e:
-            print(f"Failed to load {raw_path}: {e}")
+    # Log current learning rate
+    lr = optimizer.param_groups[0]['lr']
+    writer.add_scalar('train/lr', lr, epoch)
 
-    if not all_preproc_datasets:
-        raise RuntimeError("No preprocessed files found; run preprocessing or point to the correct directory")
-
-    concat_preproc = BaseConcatDataset(all_preproc_datasets)
-
-    window_size_samples = int(window_sec * sfreq)
-    window_stride_samples = int(window_size_samples * (1 - overlap_ratio))
-
-    windows_ds = create_fixed_length_windows(
-        concat_preproc,
-        start_offset_samples=0,
-        stop_offset_samples=None,
-        window_size_samples=window_size_samples,
-        window_stride_samples=window_stride_samples,
-        drop_last_window=False,
-        preload=True,
-    )
-
-    print(f"Created windows dataset with {len(windows_ds)} windows (window_sec={window_sec}, overlap={overlap_ratio})")
-    return windows_ds
-
+    return train_loss
 
 def main():
     args = parse_args()
     np.random.seed(args.seed); torch.manual_seed(args.seed)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     data_root = Path(args.data_root)
     preproc_root = data_root / args.preproc_out
+    sfreq = 100.0  # Target sampling frequency (Default 100 Hz)
 
-    # 1) Load per-task datasets (lightweight: does not preprocess immediately)
-    data_total = load_task_datasets(cache_dir=data_root, tasks=args.tasks, release=args.release, mini=args.mini, download=args.download)
+    # # 1) Load per-task datasets (lightweight: does not preprocess immediately)
+    # data_total = load_task_datasets(cache_dir=data_root, tasks=args.tasks, release=args.release, mini=args.mini, download=args.download)
 
     # 2) Optionally preprocess and save preprocessed FIF files
     if args.preprocess:
-        preprocess_tasks(data_total, out_dir=preproc_root, sfreq=100.0, overwrite=False)
+        releases = args.release if isinstance(args.release, list) \
+                    else [args.release]
+        # preprocess_tasks(data_total, out_dir=preproc_root, sfreq=100.0, overwrite=False)
+        preprocess_all_releases(cache_dir=args.data_root, 
+                                tasks=args.tasks, 
+                                releases=releases,
+                                out_dir=preproc_root, 
+                                mini = args.mini,
+                                download = args.download,
+                                sfreq=100.0, 
+                                overwrite=False)
+        
 
     # 3) Create fixed-length windows from preprocessed files (if preprocessing was run), otherwise try to create from raw caches
     try:
-        windows_ds = create_fixed_windows_from_preprocessed(preproc_root, window_sec=args.window_sec, sfreq=100.0, overlap_ratio=args.overlap)
+        windows_ds = create_fixed_windows_from_preprocessed(preproc_root, 
+                                                            window_sec=args.window_sec, 
+                                                            sfreq=100.0, 
+                                                            overlap_ratio=args.overlap)
         print(f"Windows dataset ready: {len(windows_ds)} examples")
     except Exception as e:
-        print(f"Could not create windows from preprocessed files: {e}")
-        print("Attempting to create fixed windows directly from loaded datasets (this may be slower and memory heavy)")
-        # Fallback: concatenate raw datasets and create windows directly (like notebook before saving)
-        all_preproc_datasets = []
-        for task, ds in data_total.items():
-            for sub in ds.datasets:
-                try:
-                    if not getattr(sub.raw, "preload", False):
-                        sub.raw.load_data()
-                    all_preproc_datasets.append(BaseDataset(sub.raw, sub.description))
-                except Exception as exc:
-                    print(f"Skipping subject due to error: {exc}")
+        print(f"Error creating windows from preprocessed data: {e}")
 
-        if not all_preproc_datasets:
-            print("No raw datasets found to create windows from. Exiting.")
-            return
+        return
+        # print("Attempting to create windows directly from raw cached datasets...")
+        # Fallback: create windows directly from raw cached datasets
+        # all_datasets = []
+        # for task, ds in data_total.items():
+        #     all_datasets.append(ds)
+        # concat_ds = BaseDataset.concatenate(all_datasets)
+        # windows_ds = create_fixed_length_windows(
+        #     concat_ds,
+        #     window_size_samples=int(args.window_sec * 100.0),
+        #     overlap=int(args.overlap * args.window_sec * 100.0),
+        #     drop_last_window=True,
+        #     shuffle=True,
+        #     n_jobs=-1,
+        #     preprocessors=None
+        # )
+        # print(f"Windows dataset ready from raw caches: {len(windows_ds)} examples")
 
-        concat_preproc = BaseConcatDataset(all_preproc_datasets)
-        windows_ds = create_fixed_length_windows(
-            concat_preproc,
-            start_offset_samples=0,
-            stop_offset_samples=None,
-            window_size_samples=int(args.window_sec * 100.0),
-            window_stride_samples=int(args.window_sec * 100.0 * (1 - args.overlap)),
-            drop_last_window=False,
-            preload=True,
-        )
-        print(f"Created windows dataset directly from raws: {len(windows_ds)} windows")
 
-    # Print a small summary and exit
+    # Print a small summary
     print("Summary:")
     print(f" - Data root: {data_root}")
-    print(f" - Tasks loaded: {list(data_total.keys())}")
+    print(f" - Tasks loaded: {args.tasks}")
     print(f" - Window length (s): {args.window_sec}, overlap: {args.overlap}")
-    print("Script completed. You can now plug this data pipeline into your training loop.")
+    temperal_length = int(args.window_sec * sfreq)
+    in_channels = 129  # Assuming standard EEG channel count
+
+    augmentation = JEPAGPUAugment(
+        in_channels = in_channels,
+        chunk_length = temperal_length,
+        padding_percent = args.padding_percent,
+        noise_std = args.noise_std,
+        time_flip_p = args.time_flip_p,
+        channel_dropout_p = args.channel_dropout_p,
+        device = device
+    )
+
+    # Build a DataLoader from the windows dataset for pretraining
+    batch_size = args.batch_size
+    n_workers = args.num_workers
+
+    loader = torch.utils.data.DataLoader(windows_ds, batch_size=batch_size,
+                                         shuffle=True, num_workers=n_workers,
+                                         collate_fn=_collate_windows, drop_last=True)
+
+    # --- Training setup ---
+    model = EegMambaJEPA(d_model=args.d_model, n_layer=args.n_layers).to(device)
+
+    # Target encoder for EMA (optional but useful in momentum methods)
+    model.attach_target(device=device)
+
+    criterion = VICReg(d_model = args.d_model).to(device)
+    optimizer = optim.AdamW(list(model.parameters()) + list(criterion.parameters()), 
+                            lr = args.lr)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
+
+
+    # Loading TensorBoard
+    log_dir = Path(args.log_dir) / 'runs' / time.strftime('%Y%m%d-%H%M%S')
+    writer = SummaryWriter(log_dir=str(log_dir))
+
+    # EMA and checkpoint params
+    ema_decay = args.momentum_decay
+    save_dir = Path(args.checkpoint_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    # # Training loop
+    epochs = args.epochs
+    checkpoint_interval = args.checkpoint_interval
+
+    start_epoch = 1
+    ## Load the checkpoint
+    if args.checkpoint:
+        ckpt_files = sorted(save_dir.glob('pretrain_epoch*.pt'), key=os.path.getmtime)
+        if len(ckpt_files) == 0:
+            print(f"No checkpoint files found in {save_dir}. Starting from scratch.")
+        else:
+            latest_ckpt = ckpt_files[-1]
+            print(f"Loading checkpoint from {latest_ckpt}")
+            ckpt = torch.load(latest_ckpt, map_location=device)
+            model.load_state_dict(ckpt['model_state'])
+            optimizer.load_state_dict(ckpt['optimizer_state'])
+            criterion.load_state_dict(ckpt['criterion_state'])
+            start_epoch = ckpt['epoch'] + 1
+            print(f"Resuming training from epoch {start_epoch}")
+
+
+    for epoch in range(start_epoch, epochs + 1):
+        model.train()
+        train_loss = train_one_epoch(model, loader, criterion, optimizer, device,
+                                     augmentation, epoch, writer, scheduler = scheduler,
+                                     ema_decay = ema_decay)
+        print(f"Epoch {epoch} train_loss={train_loss:.4f}")
+
+        # Checkpointing
+        if epoch % checkpoint_interval == 0:
+            ckpt = {
+                'epoch': epoch,
+                'model_state': model.state_dict(),
+                'optimizer_state': optimizer.state_dict(),
+                'criterion_state': criterion.state_dict(),
+                'train_loss': train_loss,
+            }
+            ckpt_path = save_dir / f'pretrain_epoch{epoch:03d}.pt'
+            torch.save(ckpt, ckpt_path)
+            print(f"Saved checkpoint: {ckpt_path}")
+
+
+    writer.close()
+    print("Pretraining finished.")
 
 
 if __name__ == '__main__':

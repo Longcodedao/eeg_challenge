@@ -1,8 +1,9 @@
+import typing
 import torch
 import torch.nn as nn
 from mamba_ssm import Mamba
 from einops import rearrange
-
+import copy
 
 # --- Patch Embedding Layer ---
 class PatchEmbed(nn.Module):
@@ -114,9 +115,14 @@ class NeuroBiMambaBlock(nn.Module):
 
         # 3) bi-directional Mamba processing
         mamba_out = self._run_bi_mamba(conv_activated)  # (B, L, 2*hidden_dim)
+        fwd_out, bwd_out = mamba_out.chunk(2, dim=-1)  # each (B, L, hidden_dim)
 
-        # 4) gated output and projection back to d_model
-        gated = mamba_out * self.activation(gate)  # element-wise gating
+        # 4) gated output and projection back to d_model   
+        gate_activation = self.activation(gate)
+        gated_fwd = fwd_out * gate_activation
+        gated_bwd = bwd_out * gate_activation
+        gated = torch.cat([gated_fwd, gated_bwd], dim=-1)  # (B, L, 2*hidden_dim)
+
         out = self.out_proj(gated)  # (B, L, d_model)
 
         # residual connection
@@ -128,7 +134,7 @@ class EegMambaJEPA(nn.Module):
     """
     JEPA-style backbone using Patch embedding + stacked NeuroBiMambaBlock layers.
 
-    Input: (B, C, T)
+    Input: (B, C, T): (Batch, Channels, Time)
     Output: CLS token embedding -> (B, d_model)
     """
     def __init__(
@@ -198,6 +204,38 @@ class EegMambaJEPA(nn.Module):
 
         # Return CLS representation
         return x[:, 0]
-# ...existing code...
 
 
+    def attach_target(self, 
+                      device: typing.Optional[torch.device] = None) -> 'EegMambaJEPA':
+        """
+        Create an EMA target copy of this model. Call once after instantiation.
+
+        Args:
+            device: optional device to move the target model to (e.g. torch.device('cuda')).
+        """
+        self.target_model = copy.deepcopy(self)
+
+        # Freeze target parameters
+        for param in self.target_model.parameters():
+            param.requires_grad = False
+
+        # Put target in eval mode
+        self.target_model.eval()
+
+        if device is not None:
+            self.target_model = self.target_model.to(device)
+
+    @torch.no_grad()
+    def update_target(self, decay: float = 0.999):
+        if self.target_model is None:
+            raise ValueError("Target model not attached. Call attach_target() first.")
+        
+        for param_o, param_t in zip(self.parameters(), self.target_model.parameters()):
+            param_t.data.mul_(decay).add_(param_o.data, alpha=1.0 - decay)
+
+    @torch.no_grad()
+    def target_forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.target_model is None:
+            raise ValueError("Target model not attached. Call attach_target() first.")
+        return self.target_model(x)
