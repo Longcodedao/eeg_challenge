@@ -15,3 +15,10 @@ LOL_DATASET/*
 
 checkpoints/
 checkpoints/*
+
+model/__pycache__/
+model/__pycache__/*
+
+__pycache__/
+__pycache__/*
+*.pyc

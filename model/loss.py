@@ -11,8 +11,11 @@ class VICReg(nn.Module):
         
         super().__init__()
 
+        # Invariance weight
         self.lambda_val = lambda_val
+        # Variance weight
         self.mu_val = mu_val
+        # Covariance weight
         self.nu_val = nu_val
         self.eps = eps
 

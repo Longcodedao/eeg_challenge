@@ -2,13 +2,14 @@ python pretrain.py \
     --release R1 R2 R3 \
     --mini \
     --window-sec 6 \
-    --epochs 200 \
-    --batch-size 256 \
+    --epochs 10 \
+    --warmup-epochs 2 \
+    --batch-size 512 \
     --lr 1e-4 \
     --momentum-decay 0.995 \
     --log-dir runs/ \
     --checkpoint-dir checkpoints/ \
-    --checkpoint-interval 20 \
+    --checkpoint-interval 1 \
     --num-workers 4
 
     

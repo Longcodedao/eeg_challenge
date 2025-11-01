@@ -17,6 +17,7 @@ from braindecode.preprocessing import create_fixed_length_windows
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from lr_scheduler import CosineLRScheduler
 
 import argparse
 import copy
@@ -60,6 +61,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=10, help="Number of pretraining epochs")
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size for pretraining")
     parser.add_argument("--num-workers", type=int, default=4, help="Number of workers for the batch loader")
+    parser.add_argument("--warmup-epochs", type=int, default=20, help="Number of warmup epochs for LR scheduler")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for optimizer")
     parser.add_argument("--momentum-decay", type=float, default=0.995, help="EMA momentum decay for target encoder")
 
@@ -307,7 +309,11 @@ def main():
     criterion = VICReg(d_model = args.d_model).to(device)
     optimizer = optim.AdamW(list(model.parameters()) + list(criterion.parameters()), 
                             lr = args.lr)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
+    # scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
+    scheduler = CosineLRScheduler(optimizer,
+                                  cosine_epochs = args.epochs,
+                                  warmup_epochs = args.warmup_epochs,
+    )
 
 
     # Loading TensorBoard
@@ -336,6 +342,20 @@ def main():
             model.load_state_dict(ckpt['model_state'])
             optimizer.load_state_dict(ckpt['optimizer_state'])
             criterion.load_state_dict(ckpt['criterion_state'])
+
+                    # Safe scheduler loading with error handling
+            if 'scheduler_state' in ckpt:
+                try:
+                    scheduler.load_state_dict(ckpt['scheduler_state'])
+                    print("✅ Successfully loaded scheduler state from checkpoint")
+                except Exception as e:
+                    print(f"⚠️  Warning: Could not load scheduler state: {e}")
+                    print("Scheduler will start from initial state (this may affect LR schedule)")
+                    # Optionally: manually set last_epoch to maintain LR continuity
+                    scheduler.last_epoch = ckpt['epoch']
+            else:
+                print("⚠️  No scheduler state found in checkpoint")
+
             start_epoch = ckpt['epoch'] + 1
             print(f"Resuming training from epoch {start_epoch}")
 
@@ -354,6 +374,7 @@ def main():
                 'model_state': model.state_dict(),
                 'optimizer_state': optimizer.state_dict(),
                 'criterion_state': criterion.state_dict(),
+                'scheduler_state': scheduler.state_dict(),
                 'train_loss': train_loss,
             }
             ckpt_path = save_dir / f'pretrain_epoch{epoch:03d}.pt'
