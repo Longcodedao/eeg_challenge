@@ -4,15 +4,35 @@ python pretrain.py \
     --window-sec 6 \
     --epochs 10 \
     --warmup-epochs 2 \
-    --batch-size 512 \
+    --batch-size 2048 \
     --lr 1e-4 \
     --momentum-decay 0.995 \
     --log-dir runs/ \
     --checkpoint-dir checkpoints/ \
-    --checkpoint-interval 1 \
+    --checkpoint-interval 20 \
     --num-workers 4
 
     
+# For full training (use --preprocess if needed)
+python pretrain.py \
+    --data-root MyNeurIPSData/MyNeurIPSData/HBN_DATA_FULL/ \
+    --release R10 R11 \
+    --window-sec 2 \
+    --epochs 200 \
+    --warmup-epochs 20 \
+    --batch-size 2048 \
+    --lr 1e-4 \
+    --momentum-decay 0.995 \
+    --log-dir runs/ \
+    --checkpoint-dir checkpoints/ \
+    --checkpoint-interval 20 \
+    --num-workers 4
+
+## Note that we have to have the big data to be able to preprocess so if you want to preprocess it 
+## Set the download to True. Otherwise I will clean everything here for reducing the memory here 
+
+
+
 # Download dataset option
 # Download mini dataset (default)
 python download_dataset.py

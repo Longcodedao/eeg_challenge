@@ -9,6 +9,9 @@ from pathlib import Path
 import shutil
 import json
 from typing import List
+from tqdm import tqdm
+from collections import defaultdict
+
 
 def build_preprocessors(sfreq: float = 100.0):
     """Return a list of Preprocessor callables similar to the notebook.
@@ -41,16 +44,21 @@ def load_task_datasets(cache_dir: str, tasks: list,
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     for task in tasks:
-        print(f"Loading task: {task} (release={release}, mini={mini})")
-        ds = EEGChallengeDataset(
-            cache_dir=str(cache_dir),
-            mini=mini,
-            task=task,
-            download=download,
-            release=release,
-            n_jobs=-1,
-        )
-        data_total[task] = ds
+        try:
+            print(f"Loading task: {task} (release={release}, mini={mini})")
+            ds = EEGChallengeDataset(
+                cache_dir=str(cache_dir),
+                mini=mini,
+                task=task,
+                download=download,
+                release=release,
+                n_jobs=-1,
+            )
+            data_total[task] = ds
+        except Exception as e:
+            print(f"There is an error in processing task = {task} with release = {release}")
+            continue
+        
     return data_total
 
 
@@ -85,6 +93,7 @@ def preprocess_tasks(data_total: dict, out_dir: str, sfreq: float = 100.0, overw
             print(f"Saved preprocessed files for {task} (found {len(list(task_dir.rglob('*-raw.fif')))} files)")
         except Exception as e:
             print(f"Warning: preprocessing failed for {task}: {e}")
+
 
 
 def _find_subject_id_in_folder(folder: Path) -> str:
@@ -201,20 +210,14 @@ def preprocess_all_releases(cache_dir: str, tasks: List[str], releases: List[str
     print(f"Preprocessing and consolidation complete. Consolidated preprocessed data at: {out_root}")
 
 
-def create_fixed_windows_from_preprocessed(preproc_root: str, window_sec: float = 30.0, sfreq: float = 100.0, overlap_ratio: float = 0.5):
+def create_fixed_windows_from_preprocessed(preproc_root: str, 
+        window_sec: float = 30.0, 
+        sfreq: float = 100.0, 
+        overlap_ratio: float = 0.5,
+        preload: bool = False,
+        min_samples: int = 200):
     """Search preprocessed FIF files under preproc_root and create fixed-length windows dataset.
-
-    This version:
-      - globs all .fif files under preproc_root
-      - infers subject and task from the file path (consolidated layout: <preproc_root>/<subject>/<task>/*.fif)
-      - if multiple files exist for the same (subject, task), appends a numeric suffix to the task description:
-            task  -> task
-            task (second file) -> task-2
-            task (third file)  -> task-3
-      - returns a braindecode BaseConcatDataset of all found files converted to windows.
-
-    Returns:
-        windows_ds (braindecode dataset)
+    ...
     """
 
     preproc_root = Path(preproc_root)
@@ -223,14 +226,28 @@ def create_fixed_windows_from_preprocessed(preproc_root: str, window_sec: float 
     all_preproc_datasets = []
 
     # Count occurrences per (subject, task) so we can add numeric suffixes when needed
-    from collections import defaultdict
     seen_counts = defaultdict(int)
 
-    for raw_path in raw_paths:
+    # iterate with a progress bar and skip files whose computed window size is < 200 samples
+    for raw_path in tqdm(raw_paths, desc="Scanning preprocessed files"):
         try:
-            raw = read_raw_fif(raw_path, preload=True, verbose=False)
+            raw = read_raw_fif(raw_path, preload=preload, verbose=False)
         except Exception as e:
             print(f"Failed to load {raw_path}: {e}")
+            continue
+
+        # compute per-file window size using the file's sampling rate (falls back to provided sfreq)
+        # Use file's actual sfreq
+        file_sfreq = float(raw.info.get("sfreq", sfreq) or sfreq)
+        n_samples = raw.n_times
+        duration_sec = n_samples / file_sfreq
+        
+        if n_samples < min_samples:
+            print(f"Skipping {raw_path} — window size ({n_samples} samples) < {min_samples}")
+            try:
+                raw.close()
+            except Exception:
+                pass
             continue
 
         # Infer subject and task from path relative to preproc_root.
@@ -303,7 +320,93 @@ def create_fixed_windows_from_preprocessed(preproc_root: str, window_sec: float 
         window_size_samples=window_size_samples,
         window_stride_samples=window_stride_samples,
         drop_last_window=False,
-        preload=True,
+        preload=preload,
     )
 
     return windows_ds
+
+# from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# def _inspect_fif(path: Path, window_sec: float, sfreq: float):
+#     try:
+#         raw = read_raw_fif(path, preload=False, verbose=False)
+#     except Exception:
+#         return None
+#     try:
+#         file_sfreq = float(raw.info.get("sfreq", sfreq) or sfreq)
+#         window_samples = int(window_sec * file_sfreq)
+#     finally:
+#         try:
+#             raw.close()
+#         except Exception:
+#             pass
+#     if window_samples < 200:
+#         return None
+#     return {"path": path, "sfreq": file_sfreq, "window_samples": window_samples}
+
+
+# def create_fixed_windows_from_preprocessed(preproc_root: str, window_sec: float = 30.0, sfreq: float = 100.0, 
+#                                            overlap_ratio: float = 0.5, preload: bool = False, n_jobs: int = 32):
+#     preproc_root = Path(preproc_root)
+#     raw_paths = sorted(preproc_root.rglob("*.fif"))
+#     # 1) parallel header scan
+#     inspected = []
+#     with ThreadPoolExecutor(max_workers=max(1, n_jobs)) as ex:
+#         futures = {ex.submit(_inspect_fif, p, window_sec, sfreq): p for p in raw_paths}
+#         for fut in tqdm(as_completed(futures), total=len(futures), desc="Inspecting FIF headers"):
+#             meta = fut.result()
+#             if meta is not None:
+#                 inspected.append(meta)
+
+#     if not inspected:
+#         raise RuntimeError("No valid preprocessed files found after inspection.")
+
+#     # 2) sequentially open/read and wrap into BaseDataset (safer than creating raw objects across threads/processes)
+#     from collections import defaultdict
+#     seen_counts = defaultdict(int)
+#     all_preproc_datasets = []
+#     for meta in tqdm(inspected, desc="Wrapping BaseDatasets"):
+#         p = meta["path"]
+#         try:
+#             raw = read_raw_fif(p, preload=preload, verbose=False)
+#         except Exception as e:
+#             print(f"Failed to load {p}: {e}")
+#             continue
+
+#         # infer subject/task from path (same logic as before)
+#         try:
+#             rel = p.relative_to(preproc_root)
+#             parts = rel.parts
+#         except Exception:
+#             parts = p.parts
+#         if len(parts) >= 3:
+#             subject, task = parts[0], parts[1]
+#         elif len(parts) == 2:
+#             task = parts[0]
+#             stem = p.stem
+#             subject = stem.split("-", 1)[0] if "-" in stem else parts[0]
+#         else:
+#             task = p.parent.name
+#             subject = p.parent.name
+
+#         seen_counts[(subject, task)] += 1
+#         count = seen_counts[(subject, task)]
+#         task_display = task if count == 1 else f"{task}-{count}"
+
+#         desc = {"task": task_display, "task_raw": task, "subject": str(subject), "filename": p.name, "filepath": str(p)}
+#         all_preproc_datasets.append(BaseDataset(raw, desc))
+
+#     # 3) concat and window as you already do
+#     concat_preproc = BaseConcatDataset(all_preproc_datasets)
+#     window_size_samples = int(window_sec * sfreq)
+#     window_stride_samples = int(window_size_samples * (1 - overlap_ratio))
+#     windows_ds = create_fixed_length_windows(
+#         concat_preproc,
+#         start_offset_samples=0,
+#         stop_offset_samples=None,
+#         window_size_samples=window_size_samples,
+#         window_stride_samples=window_stride_samples,
+#         drop_last_window=False,
+#         preload=preload,
+#     )
+#     return windows_ds

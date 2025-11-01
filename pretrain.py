@@ -41,6 +41,7 @@ def parse_args():
     parser.add_argument("--mini", action="store_true", help="Use mini dataset mode (faster for debugging)")
     parser.add_argument("--download", action="store_true", help="Allow dataset download if not present")
     parser.add_argument("--preprocess", action="store_true", help="Run braindecode preprocessing step and save results")
+    parser.add_argument("--preload", action="store_true", help="Preload datasets into memory")
     parser.add_argument("--preproc-out", type=str, default="preprocessed", help="Directory to save preprocessed outputs (under data-root)")
     parser.add_argument("--window-sec", type=float, default=2.0, help="Window length in seconds for fixed-length windows")
     parser.add_argument("--overlap", type=float, default=0.5, help="Window overlap ratio")
@@ -250,7 +251,8 @@ def main():
         windows_ds = create_fixed_windows_from_preprocessed(preproc_root, 
                                                             window_sec=args.window_sec, 
                                                             sfreq=100.0, 
-                                                            overlap_ratio=args.overlap)
+                                                            overlap_ratio=args.overlap,
+                                                            preload = args.preload)
         print(f"Windows dataset ready: {len(windows_ds)} examples")
     except Exception as e:
         print(f"Error creating windows from preprocessed data: {e}")
