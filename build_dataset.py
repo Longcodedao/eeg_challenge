@@ -4,6 +4,7 @@ from braindecode.preprocessing import (
     preprocess, Preprocessor, create_fixed_length_windows,
     exponential_moving_standardize
 )
+import mne
 from mne.io import read_raw_fif
 from pathlib import Path
 import shutil
@@ -215,7 +216,9 @@ def create_fixed_windows_from_preprocessed(preproc_root: str,
         sfreq: float = 100.0, 
         overlap_ratio: float = 0.5,
         preload: bool = False,
-        min_samples: int = 200):
+        min_samples: int = 200,
+        required_channels: int = 129,
+        channel_type: str = "eeg"):
     """Search preprocessed FIF files under preproc_root and create fixed-length windows dataset.
     ...
     """
@@ -248,6 +251,15 @@ def create_fixed_windows_from_preprocessed(preproc_root: str,
                 raw.close()
             except Exception:
                 pass
+            continue
+
+        # 3. Check number of EEG channels
+        eeg_picks = mne.pick_types(raw.info, meg=False, eeg=True, eog=False, ecg=False, emg=False)
+        n_eeg_channels = len(eeg_picks)
+
+        if n_eeg_channels != required_channels:
+            print(f"Skipping {raw_path} — has {n_eeg_channels} {channel_type.upper()} channels, expected {required_channels}")
+            raw.close()
             continue
 
         # Infer subject and task from path relative to preproc_root.
