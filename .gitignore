@@ -22,3 +22,14 @@ model/__pycache__/*
 __pycache__/
 __pycache__/*
 *.pyc
+
+MyEEGData_full/
+MyEEGData_full/*
+MyEEGData_mini/
+MyEEGData_mini/*
+
+preprocessed/
+preprocessed/*
+
+finetune_weight/*
+lol_weight/*

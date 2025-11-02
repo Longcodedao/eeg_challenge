@@ -32,12 +32,21 @@ python pretrain.py \
 
 
 python finetune_challenge1.py \
-    --release R1 \
-    --data-root MyNeurIPSData/MyNeurIPSData/HBN_DATA_FULL/ \
-    --checkpoint checkpoints/pretrain_epoch020.pt
-    
-    
-
+    --data-root MyEEGData_mini/ \
+    --preproc-root preprocessed \
+    --mini \
+    --weight-path finetune_weight/pretrain_epoch020.pt \
+    --log-dir ./logs \
+    --pin-memory \
+    --batch-size 16 \
+    --epochs 50 \
+    --lr 1e-4 \
+    --num-workers 4 \
+    --checkpoint-interval 5 \
+    --out ./output \
+    --checkpoint-dir ./checkpoints \
+    --use-preprocessed \
+    --checkpoint
 
 
 python finetune_challenge1.py \

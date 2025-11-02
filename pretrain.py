@@ -331,7 +331,9 @@ def main():
                                          pin_memory=True)
 
     # --- Training setup ---
-    model = EegMambaJEPA(d_model=args.d_model, n_layer=args.n_layers).to(device)
+    model = EegMambaJEPA(d_model = args.d_model, 
+                        n_layer = args.n_layers,
+                        patch_size = args.patch_size).to(device)
 
     # Target encoder for EMA (optional but useful in momentum methods)
     model.attach_target(device=device)
