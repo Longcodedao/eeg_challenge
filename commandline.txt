@@ -15,7 +15,7 @@ python pretrain.py \
     
 # For full training (use --preprocess if needed)
 python pretrain.py \
-    --data-root MyNeurIPSData/MyNeurIPSData/HBN_DATA_FULL/ \
+    --data-root MyEEGData_full/ \
     --release R10 R11 \
     --window-sec 2 \
     --epochs 200 \
@@ -27,6 +27,46 @@ python pretrain.py \
     --checkpoint-dir checkpoints/ \
     --checkpoint-interval 20 \
     --num-workers 32
+
+
+# 4 GPUs (per-GPU batch = 4096/4 = 1024, workers = 32/4 = 8)
+# Use PRETRAIN_LOGDIR and PRETRAIN_LOGFILE to customize where logs go.
+# Example:
+#   PRETRAIN_LOGDIR=logs PRETRAIN_LOGFILE=myrun.log bash commandline.txt
+# or export them beforehand:
+#   export PRETRAIN_LOGDIR=logs
+#   export PRETRAIN_LOGFILE=myrun.log
+#   bash commandline.txt
+
+# determine log dir and logfile (use env vars if set)
+PRETRAIN_LOGDIR="${PRETRAIN_LOGDIR:-runs}"
+mkdir -p "$PRETRAIN_LOGDIR"
+
+if [ -n "${PRETRAIN_LOGFILE:-}" ]; then
+    LOGFILE="$PRETRAIN_LOGDIR/$PRETRAIN_LOGFILE"
+else
+    LOGFILE="$PRETRAIN_LOGDIR/pretrain_$(date +%Y%m%d_%H%M%S).log"
+fi
+
+torchrun --nproc_per_node=4  pretrain.py \
+    --data-root MyEEGData_full/ \
+    --window-sec 2 \
+    --epochs 50 \
+    --warmup-epochs 5 \
+    --batch-size 4096 \
+    --lr 1e-4 \
+    --momentum-decay 0.995 \
+    --log-dir runs/ \
+    --checkpoint-dir checkpoints/ \
+    --checkpoint-interval 5 \
+    --num-workers 16 \
+    --bf16
+
+python preprocess_data.py \
+    --data-root MyEEGData_full/ \
+    --release R3 R4 R5 R6 R7 R8 R9 R10 R11 \
+
+
 
 ## Note that we have to have the big data to be able to preprocess so if you want to preprocess it 
 ## Set the download to True. Otherwise I will clean everything here for reducing the memory here 

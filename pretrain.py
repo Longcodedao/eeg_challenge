@@ -1,6 +1,9 @@
 import os
 import numpy as np
 import torch
+import torch.distributed as dist
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
 from pathlib import Path
 from joblib import Parallel, delayed
 import matplotlib.pyplot as plt
@@ -17,6 +20,7 @@ from braindecode.preprocessing import create_fixed_length_windows
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.amp import autocast, GradScaler
 from lr_scheduler import CosineLRScheduler
 
 import argparse
@@ -29,6 +33,10 @@ from model.eegmamba_jamba import EegMambaJEPA
 from model.loss import VICReg
 from model.mdn import MDNHead
 from augment import JEPAGPUAugment
+
+
+SFREQ = 100.0  # Target sampling frequency (Default 100 Hz)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Pretraining dataset loader and utility for JEPA-style EEG pipeline")
@@ -70,6 +78,7 @@ def parse_args():
     parser.add_argument("--checkpoint", action = "store_true", help="Whether to load from a checkpoint")
     parser.add_argument("--checkpoint-dir", type=str, default=".", help="Directory to save model checkpoints")
     parser.add_argument("--checkpoint-interval", type=int, default=1, help="Epoch interval to save checkpoints")
+    parser.add_argument("--bf16", action="store_true", help="Enable bfloat16 autocast (CUDA only)")
     return parser.parse_args()
 
 
@@ -109,9 +118,10 @@ def _make_views(x_batch, augmentation):
     return view1, view2 
 
 
-def train_one_epoch(model, loader, criterion, optimizer, device, 
+def train_one_epoch(args, model, loader, criterion, optimizer, device, 
                     augmentation, epoch, writer, scheduler = None,
-                    ema_decay: float = None):
+                    ema_decay: float = None, use_bf16: bool = False,
+                    is_master: bool = True, scaler: GradScaler = None):
     
     model.train()
     running_loss = 0.0
@@ -122,31 +132,57 @@ def train_one_epoch(model, loader, criterion, optimizer, device,
     running_param_norm = 0.0
     running_batch_time = 0.0
 
-    pbar = tqdm(enumerate(loader), total=len(loader), desc=f"Epoch {epoch}")
+    # If DataLoader uses a DistributedSampler, make sure its epoch is set for shuffling
+    try:
+        sampler = loader.sampler
+        if hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(epoch)
+    except Exception:
+        pass
+
+    pbar = tqdm(enumerate(loader), total=len(loader), desc=f"Epoch {epoch}") if is_master else enumerate(loader) 
+    autocast_dtype = None
+    if use_bf16 and device.type == "cuda":
+        autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
+    use_scaler = (autocast_dtype is not None) and (scaler is not None)
+
     for step, xb in pbar:
         t0 = time.time()
 
         xb = xb.to(device)
         x1, x2 = _make_views(xb, augmentation)
         
-        # Forward pass (online encoder)
-        z1 = model(x1)
-        z2 = model(x2)
-
-        # Compute projector outputs and components for logging (projector is part of criterion)
-        with torch.no_grad():
-            # We use the projector directly so components match the final VICReg computation
-            z1p = criterion.projector(z1)
-            z2p = criterion.projector(z2)
-            inv_comp = float(criterion._invariance_loss(z1p, z2p).detach().cpu().item())
-            var_comp = float(criterion._variance_loss(z1p, z2p).detach().cpu().item())
-            cov_comp = float(criterion._covariance_loss(z1p, z2p).detach().cpu().item())
-
-        # Full VICReg loss (this runs projector internally too)
-        loss = criterion(z1, z2)
+        # Wrap forward pass and loss calculation with autocast regardless of whether we scale
+        with autocast(device_type=device.type, 
+                      dtype=autocast_dtype if autocast_dtype is not None else torch.float32):
+            # Forward pass (online encoder)
+            z1 = model(x1)
+            z2 = model(x2)
+            # Full VICReg loss (this runs projector internally too)
+            loss = criterion(z1, z2)
+            
+            # Compute projector outputs and components for logging inside autocast
+            with torch.no_grad():
+                z1p = criterion.projector(z1)
+                z2p = criterion.projector(z2)
+                inv_comp = float(criterion._invariance_loss(z1p, z2p).detach().cpu().item())
+                var_comp = float(criterion._variance_loss(z1p, z2p).detach().cpu().item())
+                cov_comp = float(criterion._covariance_loss(z1p, z2p).detach().cpu().item())
 
         optimizer.zero_grad()
-        loss.backward()
+        
+        if use_scaler:
+            # Scale loss for safe backward pass with float16
+            scaler.scale(loss).backward()
+        else:
+            # Standard backward pass for FP32 or when no scaler is used
+            loss.backward()
+
+        # Gradient norm (L2) calculation requires unscaling gradients first if using a scaler
+        if use_scaler:
+            # Unscales the gradients of optimizer's assigned params in-place
+            scaler.unscale_(optimizer)
 
         # Gradient norm (L2) - handle None grads
         total_norm_sq = 0.0
@@ -163,14 +199,25 @@ def train_one_epoch(model, loader, criterion, optimizer, device,
             total_param_sq += param_norm.item() ** 2
         param_norm = total_param_sq ** 0.5
 
-        optimizer.step()
+        if use_scaler:
+            # scaler.step() applies the optimizer step, while skipping if gradients are inf/NaN
+            scaler.step(optimizer)
+            # Updates the scale factor for the next iteration
+            scaler.update()
+        else:
+            optimizer.step()
 
-        # EMA update for target encoder
-        if ema_decay is not None and model.target_model is not None:
-            try:
-                model.update_target(decay=ema_decay)
-            except Exception as e:
-                print(f"Warning: EMA update failed. {e}")
+        # EMA update for target encoder (handle DDP-wrapped model)
+        if ema_decay is not None:
+            # Unwrap DDP to access module attributes if needed
+            inner_model = model.module if isinstance(model, DDP) else model
+            target_exists = getattr(inner_model, "target_model", None) is not None
+            update_fn = getattr(inner_model, "update_ema", None)
+            if target_exists and callable(update_fn):
+                try:
+                    update_fn(decay=ema_decay)
+                except Exception as e:
+                    print(f"Warning: EMA update failed. {e}")
 
         batch_time = time.time() - t0
 
@@ -183,7 +230,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device,
         running_param_norm += param_norm
         running_batch_time += batch_time
 
-        if (step + 1) % 10 == 0:
+        if (step + 1) % 10 == 0 and is_master:
             avg = running_loss / (step + 1)
             pbar.set_postfix({'avg_loss': f"{avg:.4f}"})
     
@@ -204,84 +251,154 @@ def train_one_epoch(model, loader, criterion, optimizer, device,
     avg_param_norm = running_param_norm / n_batches
     avg_batch_time = running_batch_time / n_batches
 
-    # Log to tensorboard
-    writer.add_scalar('train/loss', train_loss, epoch)
-    writer.add_scalar('train/invariance', avg_inv, epoch)
-    writer.add_scalar('train/variance', avg_var, epoch)
-    writer.add_scalar('train/covariance', avg_cov, epoch)
-    writer.add_scalar('train/grad_norm', avg_grad_norm, epoch)
-    writer.add_scalar('train/param_norm', avg_param_norm, epoch)
-    writer.add_scalar('train/batch_time', avg_batch_time, epoch)
-
-    # Log current learning rate
-    lr = optimizer.param_groups[0]['lr']
-    writer.add_scalar('train/lr', lr, epoch)
+    # Log to tensorboard (only if writer provided - rank > 0 may not have writer)
+    if writer is not None:
+        writer.add_scalar('train/loss', train_loss, epoch)
+        writer.add_scalar('train/invariance', avg_inv, epoch)
+        writer.add_scalar('train/variance', avg_var, epoch)
+        writer.add_scalar('train/covariance', avg_cov, epoch)
+        writer.add_scalar('train/grad_norm', avg_grad_norm, epoch)
+        writer.add_scalar('train/param_norm', avg_param_norm, epoch)
+        writer.add_scalar('train/batch_time', avg_batch_time, epoch)
+        # Log current learning rate
+        lr = optimizer.param_groups[0]['lr']
+        writer.add_scalar('train/lr', lr, epoch)
 
     return train_loss
 
+
+# Add helper to export only the online encoder weights (exclude EMA/target copy)
+def save_online_state(model: nn.Module, path: str):
+    """
+    Save only the online encoder parameters (exclude any attached target_model).
+    Works if model is DDP-wrapped or plain module.
+    """
+    # Unwrap if DDP
+    if isinstance(model, DDP):
+        m = model.module
+    else:
+        m = model
+
+    state = {}
+    for k, v in m.state_dict().items():
+        # Normalize key by stripping leading "module." if present (defensive)
+        norm_k = k
+        if norm_k.startswith("module."):
+            norm_k = norm_k[len("module."):]
+        # Exclude any key that belongs to a target model / EMA copy
+        if "target_model" in norm_k:
+            continue
+        state[norm_k] = v.clone().cpu()
+    torch.save(state, path)
+
+
 def main():
     args = parse_args()
-    np.random.seed(args.seed); torch.manual_seed(args.seed)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # Derive distributed info from environment variables set by torchrun
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    rank = int(os.environ.get("RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    use_distributed = world_size > 1 and dist.is_available()
+
+    # Setup device and distributed process group if needed
+    if torch.cuda.is_available():
+        if use_distributed:
+            torch.cuda.set_device(local_rank)
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    else:
+        device = torch.device('cpu')
+
+    if use_distributed:
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        dist.init_process_group(backend=backend, init_method="env://")
+        # make printing only from rank 0
+        is_master = (dist.get_rank() == 0)
+    else:
+        is_master = True
+
+    np.random.seed(args.seed + (rank if 'rank' in locals() else 0))
+    torch.manual_seed(args.seed + (rank if 'rank' in locals() else 0))
 
     data_root = Path(args.data_root)
     preproc_root = data_root / args.preproc_out
-    sfreq = 100.0  # Target sampling frequency (Default 100 Hz)
-
+    print(device, use_distributed, f"RANK {rank}/{world_size}", f"Master: {is_master}")
     # # 1) Load per-task datasets (lightweight: does not preprocess immediately)
     # data_total = load_task_datasets(cache_dir=data_root, tasks=args.tasks, release=args.release, mini=args.mini, download=args.download)
 
     # 2) Optionally preprocess and save preprocessed FIF files
     if args.preprocess:
-        releases = args.release if isinstance(args.release, list) \
-                    else [args.release]
-        # preprocess_tasks(data_total, out_dir=preproc_root, sfreq=100.0, overwrite=False)
-        preprocess_all_releases(cache_dir=args.data_root, 
-                                tasks=args.tasks, 
-                                releases=releases,
-                                out_dir=preproc_root, 
-                                mini = args.mini,
-                                download = args.download,
-                                sfreq=100.0, 
-                                overwrite=False)
-        
+        releases = args.release if isinstance(args.release, list) else [args.release]
+        # Only master performs the expensive preprocessing step to avoid conflicts.
+        preprocess_ok = True
+        if is_master:
+            try:
+                # preprocess is I/O / CPU heavy — run only on rank 0
+                preprocess_all_releases(
+                    cache_dir=args.data_root,
+                    tasks=args.tasks,
+                    releases=releases,
+                    out_dir=preproc_root,
+                    mini=args.mini,
+                    download=args.download,
+                    sfreq=SFREQ,
+                    overwrite=False,
+                )
+            except Exception as e:
+                preprocess_ok = False
+                print(f"Master preprocessing failed: {e}")
+        # Synchronize so all ranks wait until master preprocessing is complete (or failed)
+        if use_distributed:
+            try:
+                dist.barrier()
+            except Exception:
+                # If barrier fails, continue — subsequent steps will surface errors when reading data.
+                pass
+        if not preprocess_ok:
+            # If master preprocessing failed, exit on master; other ranks will likely fail shortly after.
+            if is_master:
+                raise RuntimeError("Preprocessing failed on master. Aborting.")
+ 
 
     # 3) Create fixed-length windows from preprocessed files (if preprocessing was run), otherwise try to create from raw caches
-    try:
-        windows_ds = create_fixed_windows_from_preprocessed(preproc_root, 
-                                                            window_sec=args.window_sec, 
-                                                            sfreq=100.0, 
-                                                            overlap_ratio=args.overlap,
-                                                            preload = args.preload)
-        print(f"Windows dataset ready: {len(windows_ds)} examples")
-    except Exception as e:
-        print(f"Error creating windows from preprocessed data: {e}")
+    if is_master:
+        windows_ds = create_fixed_windows_from_preprocessed(
+            preproc_root=str(preproc_root),
+            window_sec=args.window_sec,
+            sfreq=SFREQ,
+            overlap_ratio=args.overlap,
+            preload=args.preload,
+            min_samples=200,
+            required_channels=129,
+            cache_metadata=True,
+            rank=rank,
+            is_master=True
+        )
+    else:
+        print(f"[RANK {rank}] Waiting for master to create windows...")
 
-        return
-        # print("Attempting to create windows directly from raw cached datasets...")
-        # Fallback: create windows directly from raw cached datasets
-        # all_datasets = []
-        # for task, ds in data_total.items():
-        #     all_datasets.append(ds)
-        # concat_ds = BaseDataset.concatenate(all_datasets)
-        # windows_ds = create_fixed_length_windows(
-        #     concat_ds,
-        #     window_size_samples=int(args.window_sec * 100.0),
-        #     overlap=int(args.overlap * args.window_sec * 100.0),
-        #     drop_last_window=True,
-        #     shuffle=True,
-        #     n_jobs=-1,
-        #     preprocessors=None
-        # )
-        # print(f"Windows dataset ready from raw caches: {len(windows_ds)} examples")
+    dist.barrier()
 
-
+    # ALL RANKS: Fast load
+    windows_ds = create_fixed_windows_from_preprocessed(
+        preproc_root=str(preproc_root),
+        window_sec=args.window_sec,
+        sfreq=SFREQ,
+        overlap_ratio=args.overlap,
+        preload=args.preload,
+        min_samples=200,
+        required_channels=129,
+        cache_metadata=True,
+        rank=rank,
+        is_master=is_master
+    )
+    
     # Print a small summary
-    print("Summary:")
-    print(f" - Data root: {data_root}")
-    print(f" - Tasks loaded: {args.tasks}")
-    print(f" - Window length (s): {args.window_sec}, overlap: {args.overlap}")
-    temperal_length = int(args.window_sec * sfreq)
+    if is_master:
+        print("Summary:")
+        print(f" - Data root: {data_root}")
+        print(f" - Tasks loaded: {args.tasks}")
+        print(f" - Window length (s): {args.window_sec}, overlap: {args.overlap}")
+    temperal_length = int(args.window_sec * SFREQ)
     in_channels = 129  # Assuming standard EEG channel count
 
     augmentation = JEPAGPUAugment(
@@ -294,46 +411,54 @@ def main():
         device = device
     )
 
-    # Build a DataLoader from the windows dataset for pretraining
+    # Build DataLoader with DistributedSampler when using DDP
     batch_size = args.batch_size
-    n_workers = args.num_workers
+    # When running distributed, split the requested total worker count across ranks
+    if use_distributed and world_size > 0:
+        n_workers = max(1, args.num_workers // world_size)
+    else:
+        n_workers = args.num_workers
+        
+    print(f"Using {n_workers} workers for data loading")
 
-    loader = torch.utils.data.DataLoader(windows_ds, batch_size=batch_size,
-                                         shuffle=True, num_workers=n_workers,
-                                         collate_fn=_collate_windows, drop_last=True)
+    sampler = DistributedSampler(windows_ds) if use_distributed else None
+
+    loader = torch.utils.data.DataLoader(
+         windows_ds,
+         batch_size=batch_size,
+         shuffle=(sampler is None),
+         num_workers=n_workers,
+         collate_fn=_collate_windows,
+         drop_last=True,
+         sampler=sampler,
+         pin_memory=(device.type == 'cuda'),
+     )
 
     # --- Training setup ---
     model = EegMambaJEPA(d_model=args.d_model, n_layer=args.n_layers).to(device)
 
-    # Target encoder for EMA (optional but useful in momentum methods)
-    model.attach_target(device=device)
-
     criterion = VICReg(d_model = args.d_model).to(device)
     optimizer = optim.AdamW(list(model.parameters()) + list(criterion.parameters()), 
                             lr = args.lr)
-    # scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
     scheduler = CosineLRScheduler(optimizer,
                                   cosine_epochs = args.epochs,
                                   warmup_epochs = args.warmup_epochs,
     )
+    scaler = GradScaler(enabled = args.bf16 and device.type == "cuda")
 
-
-    # Loading TensorBoard
+    # TensorBoard only on master
     log_dir = Path(args.log_dir) / 'runs' / time.strftime('%Y%m%d-%H%M%S')
-    writer = SummaryWriter(log_dir=str(log_dir))
+    writer = SummaryWriter(log_dir=str(log_dir)) if is_master else None
 
     # EMA and checkpoint params
     ema_decay = args.momentum_decay
     save_dir = Path(args.checkpoint_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
+    if is_master:
+        save_dir.mkdir(parents=True, exist_ok=True)
 
-    # # Training loop
-    epochs = args.epochs
-    checkpoint_interval = args.checkpoint_interval
-
+    # Load checkpoint (do this before wrapping in DDP so keys match)
     start_epoch = 1
-    ## Load the checkpoint
-    if args.checkpoint:
+    if args.checkpoint and is_master:
         ckpt_files = sorted(save_dir.glob('pretrain_epoch*.pt'), key=os.path.getmtime)
         if len(ckpt_files) == 0:
             print(f"No checkpoint files found in {save_dir}. Starting from scratch.")
@@ -344,36 +469,63 @@ def main():
             model.load_state_dict(ckpt['model_state'])
             optimizer.load_state_dict(ckpt['optimizer_state'])
             criterion.load_state_dict(ckpt['criterion_state'])
-
-                    # Safe scheduler loading with error handling
             if 'scheduler_state' in ckpt:
                 try:
                     scheduler.load_state_dict(ckpt['scheduler_state'])
                     print("✅ Successfully loaded scheduler state from checkpoint")
                 except Exception as e:
                     print(f"⚠️  Warning: Could not load scheduler state: {e}")
-                    print("Scheduler will start from initial state (this may affect LR schedule)")
-                    # Optionally: manually set last_epoch to maintain LR continuity
                     scheduler.last_epoch = ckpt['epoch']
             else:
                 print("⚠️  No scheduler state found in checkpoint")
-
             start_epoch = ckpt['epoch'] + 1
-            print(f"Resuming training from epoch {start_epoch}")
 
+    # Broadcast model and optimizer states from master to other ranks if distributed
+    model.attach_target(device=device)  # ensure target encoder is created inside module BEFORE wrapping
+
+    if use_distributed:
+        # If only master loaded a checkpoint, broadcast parameters and optimizer state to others
+        # Wrap model with DDP
+        model.to(device)
+        model = DDP(model, device_ids=[local_rank] if torch.cuda.is_available() else None, output_device=local_rank if torch.cuda.is_available() else None)
+        # Broadcast model params from rank 0 to all ranks for consistency
+        for param in model.parameters():
+            dist.broadcast(param.data, src=0)
+
+        # NOTE: optimizer state broadcasting is more involved; we rely on all ranks starting with same optimizer init,
+        # and master-loaded state is optional. If you need exact optimizer sync, consider saving optimizer state and
+        # loading it across ranks via broadcasting (not implemented here for brevity).
+    else:
+        model.to(device)
+
+    # Training loop
+    epochs = args.epochs
+    checkpoint_interval = args.checkpoint_interval
 
     for epoch in range(start_epoch, epochs + 1):
-        model.train()
-        train_loss = train_one_epoch(model, loader, criterion, optimizer, device,
-                                     augmentation, epoch, writer, scheduler = scheduler,
-                                     ema_decay = ema_decay)
-        print(f"Epoch {epoch} train_loss={train_loss:.4f}")
+        # Update sampler epoch for DDP shuffling
+        if sampler is not None:
+            sampler.set_epoch(epoch)
 
-        # Checkpointing
-        if epoch % checkpoint_interval == 0:
+        train_loss = train_one_epoch(args, model, loader, criterion, optimizer, device,
+                                     augmentation, epoch, writer, scheduler = scheduler,
+                                     ema_decay = ema_decay, use_bf16 = args.bf16, is_master = is_master,
+                                     scaler = scaler)
+        if is_master:
+            print(f"Epoch {epoch} train_loss={train_loss:.4f}")
+
+        # Checkpointing only on master
+        if is_master and (epoch % checkpoint_interval == 0):
+            # Build an online-only model_state by excluding any target_model keys and stripping module prefix
+            # Use helper which handles DDP-unwrapping
+            online_path = save_dir / f'online_encoder_epoch{epoch:03d}.pth'
+            save_online_state(model, str(online_path))
+
+            # Save full checkpoint (model_state uses online-only dictionary)
+            online_state = torch.load(str(online_path), map_location='cpu')
             ckpt = {
                 'epoch': epoch,
-                'model_state': model.state_dict(),
+                'model_state': online_state,
                 'optimizer_state': optimizer.state_dict(),
                 'criterion_state': criterion.state_dict(),
                 'scheduler_state': scheduler.state_dict(),
@@ -382,10 +534,17 @@ def main():
             ckpt_path = save_dir / f'pretrain_epoch{epoch:03d}.pt'
             torch.save(ckpt, ckpt_path)
             print(f"Saved checkpoint: {ckpt_path}")
+            print(f"Saved online encoder weights: {online_path}")
 
+    if writer is not None:
+        writer.close()
 
-    writer.close()
-    print("Pretraining finished.")
+    # Clean up distributed
+    if use_distributed:
+        dist.destroy_process_group()
+
+    if is_master:
+        print("Pretraining finished.")
 
 
 if __name__ == '__main__':

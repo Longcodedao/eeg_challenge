@@ -13,6 +13,9 @@ from typing import List
 from tqdm import tqdm
 from collections import defaultdict
 
+import torch
+import pandas as pd
+
 
 def build_preprocessors(sfreq: float = 100.0):
     """Return a list of Preprocessor callables similar to the notebook.
@@ -24,11 +27,11 @@ def build_preprocessors(sfreq: float = 100.0):
     preprocessors = [
         Preprocessor("pick", picks="eeg"),
         Preprocessor("set_eeg_reference", ref_channels="average", ch_type="eeg"),
-        Preprocessor(
-            exponential_moving_standardize,
-            factor_new=1e-3,
-            init_block_size=int(10 * sfreq),
-        ),
+        # Preprocessor(
+        #     exponential_moving_standardize,
+        #     factor_new=1e-3,
+        #     init_block_size=int(10 * sfreq),
+        # ),
     ]
     return preprocessors
 
@@ -211,102 +214,111 @@ def preprocess_all_releases(cache_dir: str, tasks: List[str], releases: List[str
     print(f"Preprocessing and consolidation complete. Consolidated preprocessed data at: {out_root}")
 
 
-def create_fixed_windows_from_preprocessed(preproc_root: str, 
-        window_sec: float = 30.0, 
-        sfreq: float = 100.0, 
-        overlap_ratio: float = 0.5,
-        preload: bool = False,
-        min_samples: int = 200,
-        required_channels: int = 129,
-        channel_type: str = "eeg"):
-    """Search preprocessed FIF files under preproc_root and create fixed-length windows dataset.
-    ...
-    """
-
+def create_fixed_windows_from_preprocessed(
+    preproc_root: str,
+    window_sec: float = 30.0,
+    sfreq: float = 100.0,
+    overlap_ratio: float = 0.5,
+    preload: bool = False,
+    min_samples: int = 200,
+    required_channels: int = 129,
+    cache_metadata: bool = True,
+    rank: int = 0,
+    is_master: bool = True
+):
     preproc_root = Path(preproc_root)
-    raw_paths = sorted(preproc_root.rglob("*.fif"))
-    print(f"Found {len(raw_paths)} preprocessed .fif files under {preproc_root}")
-    all_preproc_datasets = []
+    metadata_path = preproc_root / "windows_metadata.pt"
+    index_path = preproc_root / "windows_index.pt"
 
-    # Count occurrences per (subject, task) so we can add numeric suffixes when needed
+    # === FAST PATH: Load from cache ===
+    if cache_metadata and metadata_path.exists() and index_path.exists():
+        if not is_master:
+            print(f"[RANK {rank}] Loading cached window dataset...")
+        else:
+            print("[MASTER] Loading cached window dataset...")
+
+        metadata = torch.load(metadata_path, map_location="cpu", weights_only=False)
+        index_data = torch.load(index_path, map_location="cpu", weights_only=False)
+
+        # Reconstruct BaseDatasets from file paths
+        all_datasets = []
+        for path, desc in tqdm(index_data["datasets"], desc="Loading cached datasets"):
+            try:
+                raw = mne.io.read_raw_fif(path, preload=False, verbose=False)
+                all_datasets.append(BaseDataset(raw, desc))
+            except Exception as e:
+                print(f"Failed to load cached file {path}: {e}")
+                continue
+
+        if not all_datasets:
+            raise RuntimeError("No valid cached datasets loaded.")
+
+        concat_ds = BaseConcatDataset(all_datasets)
+
+        windows_ds = create_fixed_length_windows(
+            concat_ds,
+            start_offset_samples=0,
+            stop_offset_samples=None,
+            window_size_samples=metadata["window_size"],
+            window_stride_samples=metadata["stride"],
+            drop_last_window=True,
+            preload=preload,
+        )
+        print(f"[RANK {rank}] Loaded {len(windows_ds)} windows from cache in <2s")
+        return windows_ds
+
+    # === SLOW PATH: Full creation (ONLY MASTER) ===
+    if not is_master:
+        raise RuntimeError("Only master should run full window creation.")
+
+    print("[MASTER] Creating windows from scratch (this may take 10–30 min)...")
+    raw_paths = sorted(preproc_root.rglob("*.fif"))
+    print(f"Found {len(raw_paths)} preprocessed .fif files")
+
+    all_preproc_datasets = []
     seen_counts = defaultdict(int)
 
-    # iterate with a progress bar and skip files whose computed window size is < 200 samples
     for raw_path in tqdm(raw_paths, desc="Scanning preprocessed files"):
         try:
-            raw = read_raw_fif(raw_path, preload=preload, verbose=False)
+            raw = mne.io.read_raw_fif(raw_path, preload=preload, verbose=False)
         except Exception as e:
             print(f"Failed to load {raw_path}: {e}")
             continue
 
-        # compute per-file window size using the file's sampling rate (falls back to provided sfreq)
-        # Use file's actual sfreq
         file_sfreq = float(raw.info.get("sfreq", sfreq) or sfreq)
         n_samples = raw.n_times
-        duration_sec = n_samples / file_sfreq
-        
         if n_samples < min_samples:
-            print(f"Skipping {raw_path} — window size ({n_samples} samples) < {min_samples}")
-            try:
-                raw.close()
-            except Exception:
-                pass
-            continue
-
-        # 3. Check number of EEG channels
-        eeg_picks = mne.pick_types(raw.info, meg=False, eeg=True, eog=False, ecg=False, emg=False)
-        n_eeg_channels = len(eeg_picks)
-
-        if n_eeg_channels != required_channels:
-            print(f"Skipping {raw_path} — has {n_eeg_channels} {channel_type.upper()} channels, expected {required_channels}")
             raw.close()
             continue
 
-        # Infer subject and task from path relative to preproc_root.
-        # Typical consolidated layout: preproc_root/<subject_id>/<task>/<file.fif>
+        eeg_picks = mne.pick_types(raw.info, eeg=True, meg=False, eog=False, ecg=False)
+        if len(eeg_picks) != required_channels:
+            raw.close()
+            continue
+
+        # === Subject/Task Inference (same as yours) ===
         try:
             rel = raw_path.relative_to(preproc_root)
-            parts = rel.parts  # e.g. ('NDARFT581ZW5','contrastChangeDetection','0-raw.fif')
-        except Exception:
+            parts = rel.parts
+        except:
             parts = raw_path.parts
 
-        subject = None
-        task = None
-
         if len(parts) >= 3:
-            # Most common case after consolidation: subject / task / file
-            subject = parts[0]
-            task = parts[1]
+            subject, task = parts[0], parts[1]
         elif len(parts) == 2:
-            # Ambiguous layout. Use parent folder name as task and try to extract subject from filename,
-            # otherwise fall back to parent folder for both.
             task = parts[0]
             stem = raw_path.stem
-            # If filename looks like "<subject>-raw" or "<subject>-something", use the prefix
-            if "-" in stem:
-                subject = stem.split("-", 1)[0]
-            else:
-                subject = parts[0]
+            subject = stem.split("-", 1)[0] if "-" in stem else parts[0]
         else:
-            # Single-level or unexpected: use parent folder name for both task and subject
-            task = raw_path.parent.name
-            subject = raw_path.parent.name
+            subject = task = raw_path.parent.name
 
-        # Normalize strings
-        subject = str(subject)
-        task = str(task)
-
-        # Update counter and build display task (append -N when more than one file per (subject,task))
         seen_counts[(subject, task)] += 1
         count = seen_counts[(subject, task)]
-        if count == 1:
-            task_display = task
-        else:
-            task_display = f"{task}-{count}"
+        task_display = task if count == 1 else f"{task}-{count}"
 
         description = {
             "task": task_display,
-            "task_raw": task,       # original task folder name (no suffix)
+            "task_raw": task,
             "subject": subject,
             "filename": raw_path.name,
             "filepath": str(raw_path),
@@ -315,110 +327,41 @@ def create_fixed_windows_from_preprocessed(preproc_root: str,
         try:
             all_preproc_datasets.append(BaseDataset(raw, description))
         except Exception as e:
-            print(f"Failed to wrap {raw_path} into BaseDataset: {e}")
+            print(f"Failed to wrap {raw_path}: {e}")
+            raw.close()
 
     if not all_preproc_datasets:
-        raise RuntimeError("No preprocessed files found; run preprocessing or point to the correct directory")
+        raise RuntimeError("No valid preprocessed files found.")
 
-    concat_preproc = BaseConcatDataset(all_preproc_datasets)
-
+    concat_ds = BaseConcatDataset(all_preproc_datasets)
     window_size_samples = int(window_sec * sfreq)
-    window_stride_samples = int(window_size_samples * (1 - overlap_ratio))
+    stride_samples = int(window_size_samples * (1 - overlap_ratio))
 
     windows_ds = create_fixed_length_windows(
-        concat_preproc,
-        start_offset_samples=0,
-        stop_offset_samples=None,
+        concat_ds,
         window_size_samples=window_size_samples,
-        window_stride_samples=window_stride_samples,
-        drop_last_window=False,
+        window_stride_samples=stride_samples,
+        drop_last_window=True,
         preload=preload,
     )
 
+    # === SAVE CACHE ===
+    if cache_metadata:
+        print("[MASTER] Saving dataset cache for fast reload...")
+        torch.save({
+            "window_size": window_size_samples,
+            "stride": stride_samples,
+        }, metadata_path)
+
+        # Save lightweight index: (filepath, description)
+        index_data = {
+            "datasets": [
+                (str(ds.description["filepath"]), ds.description)
+                for ds in all_preproc_datasets
+            ]
+        }
+        torch.save(index_data, index_path)
+
+    print(f"[MASTER] Created {len(windows_ds)} windows. Cache saved.")
     return windows_ds
 
-# from concurrent.futures import ThreadPoolExecutor, as_completed
-
-# def _inspect_fif(path: Path, window_sec: float, sfreq: float):
-#     try:
-#         raw = read_raw_fif(path, preload=False, verbose=False)
-#     except Exception:
-#         return None
-#     try:
-#         file_sfreq = float(raw.info.get("sfreq", sfreq) or sfreq)
-#         window_samples = int(window_sec * file_sfreq)
-#     finally:
-#         try:
-#             raw.close()
-#         except Exception:
-#             pass
-#     if window_samples < 200:
-#         return None
-#     return {"path": path, "sfreq": file_sfreq, "window_samples": window_samples}
-
-
-# def create_fixed_windows_from_preprocessed(preproc_root: str, window_sec: float = 30.0, sfreq: float = 100.0, 
-#                                            overlap_ratio: float = 0.5, preload: bool = False, n_jobs: int = 32):
-#     preproc_root = Path(preproc_root)
-#     raw_paths = sorted(preproc_root.rglob("*.fif"))
-#     # 1) parallel header scan
-#     inspected = []
-#     with ThreadPoolExecutor(max_workers=max(1, n_jobs)) as ex:
-#         futures = {ex.submit(_inspect_fif, p, window_sec, sfreq): p for p in raw_paths}
-#         for fut in tqdm(as_completed(futures), total=len(futures), desc="Inspecting FIF headers"):
-#             meta = fut.result()
-#             if meta is not None:
-#                 inspected.append(meta)
-
-#     if not inspected:
-#         raise RuntimeError("No valid preprocessed files found after inspection.")
-
-#     # 2) sequentially open/read and wrap into BaseDataset (safer than creating raw objects across threads/processes)
-#     from collections import defaultdict
-#     seen_counts = defaultdict(int)
-#     all_preproc_datasets = []
-#     for meta in tqdm(inspected, desc="Wrapping BaseDatasets"):
-#         p = meta["path"]
-#         try:
-#             raw = read_raw_fif(p, preload=preload, verbose=False)
-#         except Exception as e:
-#             print(f"Failed to load {p}: {e}")
-#             continue
-
-#         # infer subject/task from path (same logic as before)
-#         try:
-#             rel = p.relative_to(preproc_root)
-#             parts = rel.parts
-#         except Exception:
-#             parts = p.parts
-#         if len(parts) >= 3:
-#             subject, task = parts[0], parts[1]
-#         elif len(parts) == 2:
-#             task = parts[0]
-#             stem = p.stem
-#             subject = stem.split("-", 1)[0] if "-" in stem else parts[0]
-#         else:
-#             task = p.parent.name
-#             subject = p.parent.name
-
-#         seen_counts[(subject, task)] += 1
-#         count = seen_counts[(subject, task)]
-#         task_display = task if count == 1 else f"{task}-{count}"
-
-#         desc = {"task": task_display, "task_raw": task, "subject": str(subject), "filename": p.name, "filepath": str(p)}
-#         all_preproc_datasets.append(BaseDataset(raw, desc))
-
-#     # 3) concat and window as you already do
-#     concat_preproc = BaseConcatDataset(all_preproc_datasets)
-#     window_size_samples = int(window_sec * sfreq)
-#     window_stride_samples = int(window_size_samples * (1 - overlap_ratio))
-#     windows_ds = create_fixed_length_windows(
-#         concat_preproc,
-#         start_offset_samples=0,
-#         stop_offset_samples=None,
-#         window_size_samples=window_size_samples,
-#         window_stride_samples=window_stride_samples,
-#         drop_last_window=False,
-#         preload=preload,
-#     )
-#     return windows_ds

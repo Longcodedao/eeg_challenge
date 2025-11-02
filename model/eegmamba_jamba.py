@@ -105,7 +105,9 @@ class NeuroBiMambaBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, L, d_model)
         residual = x
-        x = self.norm(x)
+        # Compute LayerNorm in fp32 for numerical stability under bfloat16 autocast,
+        # then cast back to the input dtype.
+        x = self.norm(x.float()).to(x.dtype)
 
         # 1) linear proj -> conv input + gate tensor
         conv_input, gate = self._split_projection(x)
@@ -187,6 +189,17 @@ class EegMambaJEPA(nn.Module):
         x: (B, C, T)
         returns: (B, d_model)  -- embedding for CLS token
         """
+        B, C, T = x.shape
+
+        # --- START: Per-Window Standardization ---
+        # This is the "transformation inside the model"
+        # It ensures train/test data are identically normalized (z-score).
+        # We calculate mean/std per sample (B), across channels (C) and time (T)
+        mean = torch.mean(x, dim=(1, 2), keepdim=True)
+        std = torch.std(x, dim=(1, 2), keepdim=True)
+        x = (x - mean) / (std + 1e-6)  # Add epsilon to prevent division by zero
+        # --- END: Per-Window Standardization ---
+
         # Embed patches
         x = self.patch_embed(x)  # (B, NumPatches, d_model)
 
@@ -200,7 +213,8 @@ class EegMambaJEPA(nn.Module):
 
         # Pass through Mamba blocks and final norm
         x = self.mamba_blocks(x)
-        x = self.norm_f(x)
+        # Final LayerNorm in fp32 for stability under bf16 autocast
+        x = self.norm_f(x.float()).to(x.dtype)
 
         # Return CLS representation
         return x[:, 0]
@@ -227,10 +241,12 @@ class EegMambaJEPA(nn.Module):
             self.target_model = self.target_model.to(device)
 
     @torch.no_grad()
-    def update_target(self, decay: float = 0.999):
+    def update_ema(self, decay: float = 0.999):
+        """Exponential moving average update for the target model.
+        theta_t = decay * theta_t + (1-decay) * theta_online
+        """
         if self.target_model is None:
             raise ValueError("Target model not attached. Call attach_target() first.")
-        
         for param_o, param_t in zip(self.parameters(), self.target_model.parameters()):
             param_t.data.mul_(decay).add_(param_o.data, alpha=1.0 - decay)
 

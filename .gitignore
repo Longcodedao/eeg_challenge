@@ -1,14 +1,8 @@
-MyNeurIPSData/
-MyNeurIPSData/*
+MyEEGData_full/
+MyEEGData_full/*
 
 notebooks/data/
 notebooks/data/*
-
-HBN_DATA/
-HBN_DATA/*
-
-HBN_DATA_NOTEBOOK/*
-HBN_DATA_NOTEBOOK/
 
 LOL_DATASET/
 LOL_DATASET/*
