@@ -32,4 +32,5 @@ preprocessed/
 preprocessed/*
 
 finetune_weight/*
-lol_weight/*
+finetune_weight/
+
