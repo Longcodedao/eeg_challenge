@@ -18,6 +18,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from lr_scheduler import CosineLRScheduler
+from torch.amp import autocast, GradScaler
 
 import argparse
 import copy
@@ -70,6 +71,7 @@ def parse_args():
     parser.add_argument("--checkpoint", action = "store_true", help="Whether to load from a checkpoint")
     parser.add_argument("--checkpoint-dir", type=str, default=".", help="Directory to save model checkpoints")
     parser.add_argument("--checkpoint-interval", type=int, default=1, help="Epoch interval to save checkpoints")
+    parser.add_argument("--amp", action="store_true", help="Enable mixed precision training with torch.cuda.amp (CUDA only)")
     return parser.parse_args()
 
 
@@ -111,7 +113,8 @@ def _make_views(x_batch, augmentation):
 
 def train_one_epoch(model, loader, criterion, optimizer, device, 
                     augmentation, epoch, writer, scheduler = None,
-                    ema_decay: float = None):
+                    ema_decay: float = None, use_amp: bool = False, 
+                    scaler=None):
     
     model.train()
     running_loss = 0.0
@@ -122,31 +125,49 @@ def train_one_epoch(model, loader, criterion, optimizer, device,
     running_param_norm = 0.0
     running_batch_time = 0.0
 
+    autocast_dtype = None
+    if use_amp and device.type == "cuda":
+        autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
+    use_scaler = (autocast_dtype is not None) and (scaler is not None)
+
     pbar = tqdm(enumerate(loader), total=len(loader), desc=f"Epoch {epoch}")
     for step, xb in pbar:
         t0 = time.time()
 
         xb = xb.to(device)
         x1, x2 = _make_views(xb, augmentation)
-        
-        # Forward pass (online encoder)
-        z1 = model(x1)
-        z2 = model(x2)
+        # Choose autocast dtype: prefer bfloat16 on supported devices, otherwise float16.
 
-        # Compute projector outputs and components for logging (projector is part of criterion)
-        with torch.no_grad():
-            # We use the projector directly so components match the final VICReg computation
-            z1p = criterion.projector(z1)
-            z2p = criterion.projector(z2)
-            inv_comp = float(criterion._invariance_loss(z1p, z2p).detach().cpu().item())
-            var_comp = float(criterion._variance_loss(z1p, z2p).detach().cpu().item())
-            cov_comp = float(criterion._covariance_loss(z1p, z2p).detach().cpu().item())
-
-        # Full VICReg loss (this runs projector internally too)
-        loss = criterion(z1, z2)
+        # Wrap forward pass and loss calculation with autocast regardless of whether we scale
+        with autocast(device_type=device.type, dtype=autocast_dtype if autocast_dtype is not None else torch.float32):
+            # Forward pass (online encoder)
+            z1 = model(x1)
+            z2 = model(x2)
+            # Full VICReg loss (this runs projector internally too)
+            loss = criterion(z1, z2)
+            
+            # Compute projector outputs and components for logging inside autocast
+            with torch.no_grad():
+                z1p = criterion.projector(z1)
+                z2p = criterion.projector(z2)
+                inv_comp = float(criterion._invariance_loss(z1p, z2p).detach().cpu().item())
+                var_comp = float(criterion._variance_loss(z1p, z2p).detach().cpu().item())
+                cov_comp = float(criterion._covariance_loss(z1p, z2p).detach().cpu().item())
 
         optimizer.zero_grad()
-        loss.backward()
+        
+        if use_scaler:
+            # Scale loss for safe backward pass with float16
+            scaler.scale(loss).backward()
+        else:
+            # Standard backward pass for FP32 or when no scaler is used
+            loss.backward()
+
+        # Gradient norm (L2) calculation requires unscaling gradients first if using a scaler
+        if use_scaler:
+            # Unscales the gradients of optimizer's assigned params in-place
+            scaler.unscale_(optimizer)
 
         # Gradient norm (L2) - handle None grads
         total_norm_sq = 0.0
@@ -161,9 +182,15 @@ def train_one_epoch(model, loader, criterion, optimizer, device,
         for p in list(model.parameters()) + list(criterion.parameters()):
             param_norm = p.data.norm(2)
             total_param_sq += param_norm.item() ** 2
-        param_norm = total_param_sq ** 0.5
+        param_norm = total_param_sq ** 0.5  
 
-        optimizer.step()
+        if use_scaler:
+            # scaler.step() applies the optimizer step, while skipping if gradients are inf/NaN
+            scaler.step(optimizer)
+            # Updates the scale factor for the next iteration
+            scaler.update()
+        else:
+            optimizer.step()
 
         # EMA update for target encoder
         if ema_decay is not None and model.target_model is not None:
@@ -300,7 +327,8 @@ def main():
 
     loader = torch.utils.data.DataLoader(windows_ds, batch_size=batch_size,
                                          shuffle=True, num_workers=n_workers,
-                                         collate_fn=_collate_windows, drop_last=True)
+                                         collate_fn=_collate_windows, drop_last=True,
+                                         pin_memory=True)
 
     # --- Training setup ---
     model = EegMambaJEPA(d_model=args.d_model, n_layer=args.n_layers).to(device)
@@ -361,12 +389,20 @@ def main():
             start_epoch = ckpt['epoch'] + 1
             print(f"Resuming training from epoch {start_epoch}")
 
+    # Setup AMP (automatic mixed precision) if requested and running on CUDA
+    use_amp = bool(args.amp) and (device.type == 'cuda')
+    if args.amp and not use_amp:
+        print("--amp requested but CUDA is not available; proceeding without AMP.")
+    scaler = GradScaler(enabled = use_amp) 
+
 
     for epoch in range(start_epoch, epochs + 1):
         model.train()
-        train_loss = train_one_epoch(model, loader, criterion, optimizer, device,
-                                     augmentation, epoch, writer, scheduler = scheduler,
-                                     ema_decay = ema_decay)
+        train_loss = train_one_epoch(
+            model, loader, criterion, optimizer, device,
+            augmentation, epoch, writer, scheduler=scheduler,
+            ema_decay=ema_decay, use_amp=use_amp, scaler=scaler,
+        )
         print(f"Epoch {epoch} train_loss={train_loss:.4f}")
 
         # Checkpointing

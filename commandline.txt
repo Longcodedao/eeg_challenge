@@ -18,15 +18,30 @@ python pretrain.py \
     --data-root MyNeurIPSData/MyNeurIPSData/HBN_DATA_FULL/ \
     --release R10 R11 \
     --window-sec 2 \
-    --epochs 200 \
-    --warmup-epochs 20 \
-    --batch-size 4096 \
+    --epochs 20 \
+    --warmup-epochs 5 \
+    --batch-size 8192 \
     --lr 1e-4 \
     --momentum-decay 0.995 \
     --log-dir runs/ \
     --checkpoint-dir checkpoints/ \
-    --checkpoint-interval 20 \
-    --num-workers 32
+    --checkpoint-interval 5 \
+    --checkpoint \
+    --num-workers 4 \
+    --amp
+
+
+python finetune_challenge1.py \
+    --release R1 \
+    --data-root MyNeurIPSData/MyNeurIPSData/HBN_DATA_FULL/ \
+    --checkpoint checkpoints/pretrain_epoch020.pt
+    
+    
+
+
+
+python finetune_challenge1.py \
+    --release
 
 ## Note that we have to have the big data to be able to preprocess so if you want to preprocess it 
 ## Set the download to True. Otherwise I will clean everything here for reducing the memory here 
