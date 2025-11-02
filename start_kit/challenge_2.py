@@ -27,18 +27,6 @@
 
 # > **Note:** If you need additional explanations on the [`EEGChallengeDataset`](https://eeglab.org/EEGDash/api/eegdash.html#eegdash.EEGChallengeDataset) class, dataloading, [`braindecode`](https://braindecode.org/stable/models/models_table.html)'s deep learning models, or brain decoding in general, please refer to the start-kit of challenge 1 which delves deeper into these topics.
 
-# More contents will be released during the competition inside the [`eegdash`](https://eeglab.org/EEGDash/overview.html) [examples webpage](https://eeglab.org/EEGDash/generated/auto_examples/index.html).
-
-# We will establish direct communication channels with you over the next two months, resolve platform issues, and discuss other details.
-
-# We are going to do weekly one-hour support time to help teams that may have difficulties with any technical aspects that may arise.
-
-# We will have closer communication starting next week, 08/09/2025.
-
-# Before we begin, I just want to make a deal with you, ok?
-
-# This is a community competition with a strong open-source foundation. When I say open-source, I mean volunteer work.
-
 # So, if you see something that does not work or could be improved, first, **please be kind**, and we will fix it together on GitHub, okay?
 
 # The entire decoding community will only go further when we stop solving the same problems over and over again, and start working together.
