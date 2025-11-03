@@ -44,9 +44,28 @@ python finetune_challenge1.py \
     --num-workers 4 \
     --checkpoint-interval 5 \
     --out ./output \
-    --checkpoint-dir ./checkpoints \
+    --checkpoint-dir ./checkpoints_challenge1 \
     --use-preprocessed \
     --checkpoint
+
+
+python finetune_challenge2.py \
+    --data-root MyEEGData_mini/ \
+    --release R1 \
+    --preproc-root preprocessed \
+    --mini \
+    --weight-path finetune_weight/pretrain_epoch020.pt \
+    --log-dir ./logs \
+    --batch-size 2048 \
+    --epochs 10 \
+    --epochs-meta 5 \
+    --lr 1e-4 \
+    --num-workers 4 \
+    --checkpoint-interval 1 \
+    --out ./output/finetune_challenge2.pt \
+    --checkpoint-dir ./checkpoints_challenge2 \
+    --use-preprocessed
+
 
 
 python finetune_challenge1.py \

@@ -1,4 +1,4 @@
-"""Finetune pipeline for Challenge 1 (Contrast Change Detection)
+"""Finetune pipeline for Challenge 2 (Predicting Externalizing Factor)
 
 This script adapts the start_kit example to run locally on the provided
 dataset root (default: MyNeurIPSData/MyNeurIPSData/HBN_DATA_FULL).
@@ -23,15 +23,16 @@ import argparse
 import time
 import copy
 
-import torch
 import numpy as np
-from torch.utils.data import DataLoader
-from sklearn.model_selection import train_test_split
+import torch
+from torch.utils.data import DataLoader, random_split
+
 from sklearn.utils import check_random_state
 from tqdm import tqdm
 
 from lr_scheduler import CosineLRScheduler
 import joblib
+import math
 
 try:
     from eegdash.dataset import EEGChallengeDataset
@@ -45,198 +46,355 @@ except Exception as e:
     EEGChallengeDataset = None
 
 from braindecode.preprocessing import Preprocessor, preprocess, create_windows_from_events
-from braindecode.datasets import BaseConcatDataset
+from braindecode.preprocessing import create_fixed_length_windows
+
+from braindecode.datasets.base import EEGWindowsDataset, BaseConcatDataset, BaseDataset
+
 import torch.nn as nn
 from model.eegmamba_jamba import EegMambaJEPA
 from torch.utils.tensorboard import SummaryWriter 
 from torchmetrics import MetricCollection, MeanMetric, Accuracy
 from torch.amp import autocast, GradScaler
+from model.meta_encoder import MetaEncoder
+from model.mdn import MDNHead
+from model.loss import mdn_loss
+import torch.nn.functional as F
 
-
-SHIFT_AFTER_STIM = 0.5
 SFREQ = 100
-WINDOW_SEC = 2.0 
-ANCHOR = "stimulus_anchor"
+CROP_SEC = 2
+WINDOW_SEC = 4
+STRIDE_SEC = 2
+DESCRIPTION_FILEDS = [
+    "subject", "session", "run", "task", "age", "gender", "sex", "p_factor"
+]
+TASK_NAMES = [
+    "RestingState", "DespicableMe", "DiaryOfAWimpyKid", "FunwithFractals",
+    "ThePresent", "contrastChangeDetection", "seqLearning6target",
+    "seqLearning8target", "surroundSupp", "symbolSearch"
+]
+# TASK_NAMES = [
+#     "RestingState",
+# ]
 
-
-class FinetuneJEPA(nn.Module):
-    """Simple wrapper: EegMambaJEPA backbone -> linear regression head."""
-    def __init__(self, 
-                 n_chans: int = 129, 
-                 d_model: int = 256, 
-                 n_layer: int = 8, 
-                 patch_size: int = 10
-                 ):
-        super().__init__()
-        self.backbone = EegMambaJEPA(
-            d_model=d_model, 
-            n_layer=n_layer, 
-            n_channels=n_chans, 
-            patch_size=patch_size
-            )
-        self.head = nn.Linear(d_model, 1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, C, T)
-        z = self.backbone(x)  # (B, d_model)
-        out = self.head(z)    # (B, 1)
-        return out
-
-
-class ContrastChangeDataset(torch.utils.data.Dataset):
-    def __init__(self, braindecode_dataset):
-        self.dataset = braindecode_dataset
+class CropMetaWrapper(BaseDataset):
+    def __init__(self, windows_ds, 
+                        crop_samples, 
+                        meta_encoder, 
+                        target_name="externalizing"):
+        
+        self.windows_ds = windows_ds
+        self.crop_samples = crop_samples
+        self.meta_encoder = meta_encoder
+        self.target_name = target_name
+        self.rng = np.random.default_rng(2025)  # fixed seed
 
     def __len__(self):
-        return len(self.dataset)
+        return len(self.windows_ds)
 
     def __getitem__(self, idx):
-        X, y, _ = self.dataset[idx]
-        return torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
+        X, _, crop_inds = self.windows_ds[idx]  # X: (C, 4*SFREQ)
+
+        # Target
+        target = float(self.windows_ds.description[self.target_name])
+
+        # Meta
+        desc = self.windows_ds.description
+        meta_dict = {
+            "task": desc["task"],
+            "sex": desc["sex"],
+            "age": float(desc["age"]),
+        }
+        meta_vec = self.meta_encoder.transform(meta_dict)
+
+        # Random 2s crop
+        i_win, i_start, i_stop = crop_inds
 
 
-def train_one_epoch(model, loader, criterion, optimizer, scheduler, scaler,
-                    device, epoch, writer, use_amp=False):
-    model.train()
+        assert i_stop - i_start >= self.crop_samples
+
+        # FIXED: .integers instead of .randint
+        offset = self.rng.integers(0, i_stop - i_start - self.crop_samples + 1)
+        i_start = i_start + offset
+        i_stop = i_start + self.crop_samples
+        X_crop = X[:, offset : offset + self.crop_samples]  # (C, 2*SFREQ)
+
+        # Infos
+        infos = {
+            "subject": desc["subject"],
+            "session": desc.get("session", ""),
+            "run": desc.get("run", ""),
+            "task": desc["task"],
+            "sex": desc["sex"],
+            "age": float(desc["age"]),
+        }
+
+        return torch.tensor(X_crop), meta_vec, target, (i_win, i_start, i_stop), infos
+
+
+# class FinetuneJEPA_Challenge2(nn.Module):
+#     def __init__(self, n_channels, d_model, n_layer, patch_size, meta_dim):
+#         super(FinetuneJEPA_Challenge2, self).__init__()
+#         self.backbone = EegMambaJEPA(
+#             n_channels=n_channels,
+#             d_model=d_model,
+#             n_layer=n_layer,
+#             patch_size=patch_size,
+#         )
+
+#         # Meta projection
+#         self.meta_proj = nn.Linear(meta_dim, d_model)
+
+#         # Heads
+#         self.train_head = nn.Linear(d_model * 2, 1)  # Regression head
+#         self.submit_head = nn.Linear(d_model, 1)  # Regression head
+        
+#         # Mode  
+#         self.training_with_meta = True
+
+#     # ======= Training with Meta ========
+#     def forward(self, x, meta = None):
+#         # x: (B, C, T)
+#         z = self.backbone(x)  # (B, d_model)
+
+#         if self.training_with_meta and meta is not None:
+#             m = self.meta_proj(meta)  # (B, d_model)
+#             z = torch.cat([z, m], dim = -1)  # (B, d_model * 2
+#             return self.train_head(z)  # (B, 1)
+#         else:
+#             return self.submit_head(z)  # (B, 1)
+
+#     # ======= Freeze and Switch =========
+#     def switch_to_submit(self):
+#         print("FREEZING backbone...")
+#         for p in self.backbone.parameters():
+#             p.requires_grad = False
+#         self.training_with_meta = False
+#         self.eval()
+
+class FinetuneJEPA_Challenge2(nn.Module):
+    def __init__(self, n_channels=129, d_model=256, n_layer=8, patch_size=10, meta_dim=13):
+        super().__init__()
+        self.backbone = EegMambaJEPA(
+            n_channels=n_channels,
+            d_model=d_model,
+            n_layer=n_layer,
+            patch_size=patch_size,
+        )
+        self.meta_proj = nn.Linear(meta_dim, d_model)
+
+        # MDN Heads
+        self.train_head = MDNHead(input_dim=d_model * 2, n_mixtures=3)
+        self.submit_head = MDNHead(input_dim=d_model, n_mixtures=3)
+
+        # MODE
+        self.mode = "train"  # "train", "val", "submit"
+
+    def forward(self, x, meta=None):
+        z = self.backbone(x)  # (B, d_model)
+
+        if self.mode == "train" and meta is not None:
+            m = self.meta_proj(meta)
+            z = torch.cat([z, m], dim=-1)
+            pi, sigma, mu = self.train_head(z)
+        else:
+            pi, sigma, mu = self.submit_head(z)
+
+        # RETURN BASED ON MODE
+        if self.mode == "train":
+            return pi, sigma, mu
+        else:
+            # EVALUATION / SUBMISSION: Return single number
+            # Option 1: Mean of mixture (weighted)
+            pred = (pi * mu).sum(dim=1)  # (B,)
+            # Option 2: Best component (highest pi)
+            # best_k = pi.argmax(dim=1)
+            # pred = mu.gather(1, best_k.unsqueeze(1)).squeeze(1)
+            return pred
+
+    # SWITCH MODES
+    def train_mode(self):
+        self.mode = "train"
+        self.train()
+
+    def eval_mode(self):
+        self.mode = "val"
+        self.eval()
+
+    def submit_mode(self):
+        self.mode = "submit"
+        self.eval()
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+        print("BACKBONE FROZEN. SUBMISSION READY.")
+
+    # FREEZE BACKBONE
+    def freeze_backbone(self):
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+
+
+
+def collate_fn(batch):
+    X, meta, y, _, _ = zip(*batch)
+
+    return (
+        torch.stack(X),
+        torch.stack(meta),
+        torch.tensor(y, dtype=torch.float32).unsqueeze(1),
+    )
+
+
+def train_one_epoch(
+    model, loader, criterion, optimizer, scheduler, scaler,
+    device, epoch, writer, use_amp=False, phase="backbone"
+):
+    model.train_mode()  # <-- important!
+    mse_loss_fn = nn.MSELoss()
+
     metrics = MetricCollection({
+        'mdn_loss': MeanMetric(),
         'mse': MeanMetric(),
         'rmse': MeanMetric(),
-        'parameter_norm': MeanMetric(),
-        'gradient_norm': MeanMetric(),
-        # Normalize version
-        'param_norm_normalized': MeanMetric(),
-        'grad_norm_normalized': MeanMetric(),
+        'pi_entropy': MeanMetric(),
+        'pi_max': MeanMetric(),
+        'active_mixtures': MeanMetric(),
+        'param_norm': MeanMetric(),
+        'grad_norm': MeanMetric(),
     }).to(device)
 
-    autocast_dtype = None
-    if use_amp and device.type == "cuda":
-        autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    autocast_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
 
-    def _global_l2(tensors):
-        if not tensors:
-            return torch.tensor(0.0, device=device)
+    pbar = tqdm(enumerate(loader), total=len(loader), desc=f"Epoch {epoch} [{phase}]")
+    
+    for batch_idx, batch in pbar:
+        # === UNPACK ===
+        if phase == "backbone":
+            Xb, meta, yb = batch
+            meta = meta.to(device)
+        else:
+            Xb, _, yb = batch
+        Xb, yb = Xb.to(device), yb.to(device).squeeze(-1)
 
-        vec = torch.cat([t.view(-1) for t in tensors])
-        return torch.linalg.norm(vec, ord = 2)
+        # === FORWARD ===
+        with torch.autocast(device.type, dtype=autocast_dtype if use_amp else torch.float32):
+            if phase == "backbone":
+                pi, sigma, mu = model(Xb, meta)
+            else:
+                pi, sigma, mu = model(Xb)
 
-    pbar = tqdm(enumerate(loader), total=len(loader), desc=f"Epoch {epoch} train")
-    for batch_idx, (Xb, yb) in pbar:
-        Xb = Xb.to(device)
-        yb = yb.to(device)
-        
-        with autocast(device_type=device.type,
-                        dtype=autocast_dtype if autocast_dtype is not None else torch.float32):
-            preds = model(Xb)
-            loss = criterion(preds, yb)
+            loss = criterion(pi, sigma, mu, yb)
+            pred = (pi * mu).sum(dim=1)
+            mse = mse_loss_fn(pred, yb)
 
+        # === BACKWARD ===
         optimizer.zero_grad()
+        (scaler.scale(loss) if scaler else loss).backward()
+        if scaler: scaler.unscale_(optimizer)
+        if scaler: scaler.step(optimizer); scaler.update()
+        else: optimizer.step()
 
-        if scaler is not None:
-            scaler.scale(loss).backward()
-        else:
-            loss.backward()
+        # === MIXTURE MONITORING ===
+        with torch.no_grad():
+            pi_entropy = -(pi * torch.log(pi + 1e-8)).sum(dim=1).mean()
+            pi_max = pi.max(dim=1).values.mean()
+            active = (pi > 0.1).float().sum(dim=1).mean()  # how many >10%
 
-        if scaler is not None:
-            scaler.unscale_(optimizer)
-
-        # Gradient norm (L2)
-        grad_tensors = [p.grad for p in model.parameters() if p.grad is not None]
-        grad_norm = _global_l2(grad_tensors)
-
-        # Parameter norm (L2)
-        param_tensors = [p for p in model.parameters() if p.requires_grad]
-        param_norm = _global_l2(param_tensors)
-
-        # Normalize norms
-        total_elements = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        sqrt_N = total_elements ** 0.5
-        param_norm_avg = param_norm / sqrt_N if sqrt_N > 0 else torch.tensor(0.0)
-        grad_norm_avg = grad_norm / sqrt_N if sqrt_N > 0 else torch.tensor(0.0)
-
-        if scaler is not None:
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            optimizer.step()
-
-        metrics['mse'].update(loss.detach())
-        metrics['rmse'].update(torch.sqrt(loss.detach()))
-        metrics['parameter_norm'].update(param_norm)
-        metrics['gradient_norm'].update(grad_norm)
-        metrics['param_norm_normalized'].update(param_norm_avg)
-        metrics['grad_norm_normalized'].update(grad_norm_avg)
+        # === UPDATE METRICS ===
+        metrics['mdn_loss'].update(loss)
+        metrics['mse'].update(mse)
+        metrics['rmse'].update(mse.sqrt())
+        metrics['pi_entropy'].update(pi_entropy)
+        metrics['pi_max'].update(pi_max)
+        metrics['active_mixtures'].update(active)
 
         if (batch_idx + 1) % 10 == 0:
-            avg_loss = metrics['mse'].compute().item()
-            pbar.set_postfix({'AvgMSE': f"{avg_loss:.4f}"})
+            pbar.set_postfix({
+                'MSE': f"{metrics['mse'].compute():.4f}",
+                'π-max': f"{metrics['pi_max'].compute():.3f}",
+                'mix': f"{metrics['active_mixtures'].compute():.2f}"
+            })
 
-    if scheduler is not None:
-        try:
-            scheduler.step()
-        except Exception:
-            pass
+    # === LOG ===
+    if scheduler: scheduler.step()
 
-    epoch_loss = metrics['mse'].compute().item()
-    epoch_rmse = metrics['rmse'].compute().item()
-    parameter_norm = metrics['parameter_norm'].compute().item()
-    gradient_norm = metrics['gradient_norm'].compute().item()
-    param_norm_avg = metrics['param_norm_normalized'].compute().item()
-    grad_norm_avg = metrics['grad_norm_normalized'].compute().item()
-    pbar.close()
-
-    lr = optimizer.param_groups[0]['lr']
-
-    writer.add_scalar('Train/MSE', epoch_loss, epoch)
-    writer.add_scalar('Train/RMSE', epoch_rmse, epoch)
-    writer.add_scalar('Train/LR', lr, epoch)
-    writer.add_scalar('Train/Param_Norm', parameter_norm, epoch)
-    writer.add_scalar('Train/Grad_Norm', gradient_norm, epoch)
-    writer.add_scalar('Train/Param_Norm_Normalized', param_norm_avg, epoch)
-    writer.add_scalar('Train/Grad_Norm_Normalized', grad_norm_avg, epoch)
+    log = {
+        f'{phase}/MSE': metrics['mse'].compute(),
+        f'{phase}/RMSE': metrics['rmse'].compute(),
+        f'{phase}/MDN_Loss': metrics['mdn_loss'].compute(),
+        f'{phase}/π_Entropy': metrics['pi_entropy'].compute(),
+        f'{phase}/π_Max': metrics['pi_max'].compute(),
+        f'{phase}/Active_Mixtures': metrics['active_mixtures'].compute(),
+        f'{phase}/LR': optimizer.param_groups[0]['lr'],
+    }
+    for k, v in log.items():
+        writer.add_scalar(k, v, epoch)
 
     metrics.reset()
-    return epoch_loss, epoch_rmse
+    pbar.close()
+    return log[f'{phase}/MSE'].item(), log[f'{phase}/RMSE'].item()
 
 
-def validate(model, loader, criterion, device, epoch, writer, use_amp=False):
-    model.eval()
+
+def validate(
+    model, loader, device, epoch, writer,
+    use_amp=False, phase="head"
+):
+    """
+    phase: "backbone" → validate with meta (MDN)
+           "head"     → validate without meta (final submission)
+    """
+    model.eval_mode()  # <-- switches to single-number mode
     metrics = MetricCollection({
         'mse': MeanMetric(),
         'rmse': MeanMetric(),
     }).to(device)
 
-    autocast_dtype = None
-    if use_amp and device.type == "cuda":
-        autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    autocast_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
+    pbar = tqdm(total=len(loader), desc=f"Epoch {epoch} val [{phase}]")
 
-    pbar = tqdm(total=len(loader), desc=f"Epoch {epoch} val")
     with torch.no_grad():
-        for batch_idx, (Xb, yb) in enumerate(loader):
-            Xb = Xb.to(device)
-            yb = yb.to(device)
+        for batch_idx, batch in enumerate(loader):
+            # === UNPACK ===
+            if phase == "backbone":
+                Xb, meta, yb = batch
+                meta = meta.to(device)
+            else:   
+                Xb, _, yb = batch
+            Xb, yb = Xb.to(device), yb.to(device).squeeze(-1)
 
-            with autocast(device_type=device.type,
-                            dtype=autocast_dtype if autocast_dtype is not None else torch.float32):
-                preds = model(Xb)
-                loss = criterion(preds, yb)
+            # === FORWARD ===
+            with torch.autocast(device.type, dtype=autocast_dtype if use_amp else torch.float32):
+                if phase == "backbone":
+                    pred = model(Xb, meta)
+                else:
+                    pred = model(Xb)
 
-            metrics['mse'].update(loss.detach())
-            metrics['rmse'].update(torch.sqrt(loss.detach()))
+                # Single prediction (weighted mean)
+                mse = F.mse_loss(pred, yb)
+
+            # === UPDATE ===
+            metrics['mse'].update(mse)
+            metrics['rmse'].update(mse.sqrt())
 
             if (batch_idx + 1) % 10 == 0:
-                avg_loss = metrics['mse'].compute().item()
-                pbar.set_postfix({'AvgMSE': f"{avg_loss:.4f}"})
+                pbar.set_postfix({
+                    'MSE': f"{metrics['mse'].compute():.4f}",
+                })
 
-    epoch_loss = metrics['mse'].compute().item()
-    epoch_rmse = metrics['rmse'].compute().item()
+            pbar.update()
+            
+
+    # === LOG ===
+    log = {
+        f'Val/{phase}/MSE': metrics['mse'].compute(),
+        f'Val/{phase}/RMSE': metrics['rmse'].compute(),
+    }
+    for k, v in log.items():
+        writer.add_scalar(k, v, epoch)
+
     pbar.close()
-
-    writer.add_scalar('Val/MSE', epoch_loss, epoch)
-    writer.add_scalar('Val/RMSE', epoch_rmse, epoch)
-
     metrics.reset()
-
-    return epoch_loss, epoch_rmse
+    return log[f'Val/{phase}/MSE'].item(), log[f'Val/{phase}/RMSE'].item()
 
 
 def parse_args():
@@ -249,7 +407,7 @@ def parse_args():
                         help="If set, use preprocessed files under this path (skips heavy preprocess)."
                         )
     parser.add_argument("--release", nargs='+', default=[f"R{i}" for i in range(1, 12)], help="Releases to use (e.g., R1 R5). Default: R1..R11")
-    parser.add_argument("--task", type=str, default="contrastChangeDetection")
+    parser.add_argument("--task", nargs='+', default=TASK_NAMES, help="Tasks to use (e.g., rest flanker). Default: all tasks")
     parser.add_argument("--mini", action="store_true", help="Use mini dataset mode for debugging")
     parser.add_argument("--download", action="store_true", help="Download dataset if not found")
     parser.add_argument("--use-preprocessed", action="store_true", help="Use already preprocessed files under <data_root>/preprocessed or --preproc-root")
@@ -264,6 +422,7 @@ def parse_args():
     parser.add_argument("--patch-size", type=int, default=10)
 
     parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--epochs-meta", type=int, default=35, help="Number of epochs to train with meta info")
     parser.add_argument("--warmup-epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--out", type=str, default="finetune_challenge1.pt", help="Output model path")
@@ -277,16 +436,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def build_offline_preprocessors():
-    return [
-        Preprocessor(annotate_trials_with_target, 
-                     target_field = "rt_from_stimulus", 
-                     epoch_length = 2.0, 
-                     require_stimulus = True, 
-                     require_response = True, 
-                     apply_on_array = False),
-        Preprocessor(add_aux_anchors, apply_on_array=False),
-    ]
 
 
 def main():
@@ -306,26 +455,45 @@ def main():
     print(f"Loading EEGChallengeDataset task={args.task}, releases={releases}")
 
     all_subdatasets = []
+    meta_for_encoder = []
 
     for rel in releases:
         try:
             print(f"  - loading release {rel}")
             cache_dir = Path(data_root) / f"{rel}_mini_L100_bdf" if args.mini else Path(data_root) / f"{rel}_L100_bdf"
 
-            ds_rel = EEGChallengeDataset(task=args.task, 
-                                         release=rel, 
-                                         cache_dir=cache_dir, 
-                                         mini=args.mini,
-                                         download = args.download)
-            # ds_rel.datasets is a list of per-recording dataset objects
-            all_subdatasets.append(ds_rel)
+            for task in args.task:
+                print(task)
+                ds_rel = EEGChallengeDataset(task=task, 
+                                             release=rel, 
+                                             cache_dir=cache_dir, 
+                                             mini=args.mini,
+                                             download = args.download,
+                                             description_fields = DESCRIPTION_FILEDS)
+                
+                # ds_rel.datasets is a list of per-recording dataset objects
+                ## Adding the metadata to the encoder training set
+                all_subdatasets.append(ds_rel)
+                for sub_ds in ds_rel.datasets:
+                    desc = sub_ds.description
+
+                    meta_for_encoder.append({
+                        "task": desc["task"],
+                        "sex": desc["sex"],
+                        "age": float(desc["age"]),
+                    })
+
         except Exception as e:
             print(f"Warning: failed to load release {rel}: {e}")
 
     if len(all_subdatasets) == 0:
         raise RuntimeError(f"No recordings found for task={args.task} in releases={releases}")
 
+    meta_encoder = MetaEncoder().fit(meta_for_encoder)
+    META_DIM = meta_encoder.dim
+    print(f"Meta encoder dimension: {META_DIM}")
 
+    
     # 2) Optionally preprocess (if user didn't provide preprocessed files)
     preproc_root = Path(args.preproc_root) if args.preproc_root else data_root / 'preprocessed'
     preproc_root.mkdir(parents=True, exist_ok=True)
@@ -338,78 +506,59 @@ def main():
     #     for ds in all_subdatasets:
     #         preprocess(ds, preprocessors, n_jobs=-1, save_dir=preproc_root, overwrite=False)
     list_windows = []
-
+    
     if args.use_preprocessed:
         print(f"Using preprocessed files under {preproc_root}. Skipping preprocess step.")
         for rel in releases:
-            try:
-                load_path = preproc_root / f"{rel}_windows.pkl"
-                windows = joblib.load(load_path)
-                list_windows.append(windows)
-            except Exception as e:
-                print(f"Warning: failed to load preprocessed windows for release {rel}: {e}")
+            for task in args.task:
+                try:
+                    load_path = preproc_root / f"{rel}_windows_task[{task}].pkl"
+                    windows = joblib.load(load_path)
+                    list_windows.append(windows)
+                except Exception as e:
+                    print(f"Warning: failed to load preprocessed windows for release {rel}: {e}")
     else:
         print("Running preprocessing (this may take a while).")
-        preproc = build_offline_preprocessors()
-        
+     
         for idx, ds in tqdm(enumerate(all_subdatasets), desc = "Preprocessing"):
-           
-            preprocess(ds, preproc, n_jobs = -1)
 
-            ds = keep_only_recordings_with(ANCHOR, ds)
-            windows = create_windows_from_events(
-                ds,
-                mapping={'stimulus_anchor': 0},
-                trial_start_offset_samples=int(SHIFT_AFTER_STIM * SFREQ),
-                trial_stop_offset_samples=int((SHIFT_AFTER_STIM + WINDOW_SEC) * SFREQ),
-                window_size_samples=int(WINDOW_SEC * SFREQ),
-                window_stride_samples=SFREQ,
-                preload=True,
+            rel_raw = [ds for ds in all_subdatasets if ds.release == ds.release]
+            filtered = BaseConcatDataset([
+                sub_ds for ds in rel_raw for sub_ds in ds.datasets
+                if (sub_ds.raw.n_times >= 4 * SFREQ
+                    and len(sub_ds.raw.ch_names) == 129
+                    and not math.isnan(sub_ds.description.get("externalizing", math.nan)))
+            ])
+            windows = create_fixed_length_windows(
+                filtered,
+                window_size_samples= WINDOW_SEC * SFREQ,
+                window_stride_samples= STRIDE_SEC * SFREQ,
+                drop_last_window=True,
+            )
+            windows_ds = BaseConcatDataset(
+                [CropMetaWrapper(
+                    ds, crop_samples=CROP_SEC * SFREQ, meta_encoder=meta_encoder
+                ) for ds in windows.datasets
+                ]
             )
 
-            windows = add_extras_columns(
-                windows, 
-                ds, 
-                desc=ANCHOR,
-                keys=("target", "rt_from_stimulus", "rt_from_trialstart",
-                      "stimulus_onset", "response_onset", "correct", "response_type")
-            )
-
-            list_windows.append(windows)
-
-            save_path = preproc_root / f"{releases[idx]}_windows.pkl"
-            joblib.dump(windows, save_path)
+            list_windows.append(windows_ds)
+            save_directory = preproc_root / f"{ds.release}_windows_task[{ds.description['task'].unique().item()}].pkl"
+            joblib.dump(windows_ds, save_directory)
 
     all_windows = BaseConcatDataset(list_windows)
 
-    # 4) Dividing into train and test 
-    meta = all_windows.get_metadata()
-    subjects = meta['subject'].unique()
-    valid_frac = 0.1
-    test_frac = 0.1
-    seed = 2025
-    subjects = list(subjects)
-    train_subj, valid_test_subject = train_test_split(subjects, 
-                                                      test_size = (valid_frac + test_frac), 
-                                                      random_state = check_random_state(seed), 
-                                                      shuffle=True)
-    valid_subj, test_subj = train_test_split(valid_test_subject, 
-                                             test_size = test_frac / (valid_frac+  test_frac), 
-                                             random_state = check_random_state(seed + 1), 
-                                             shuffle=True)
+    # 4) Random split by lengths
+    total_len = len(all_windows)
+    train_len = int(0.8 * total_len)
+    valid_len = int(0.1 * total_len)
+    test_len = total_len - train_len - valid_len
 
-    subject_split = all_windows.split('subject')
-    train_sets = [subject_split[s] for s in subject_split if s in train_subj]
-    valid_sets = [subject_split[s] for s in subject_split if s in valid_subj]
-    test_sets = [subject_split[s] for s in subject_split if s in test_subj]
-
-    train_ds = BaseConcatDataset(train_sets)
-    valid_ds = BaseConcatDataset(valid_sets)
-    test_ds = BaseConcatDataset(test_sets)
-
-    train_ds = ContrastChangeDataset(train_ds)
-    valid_ds = ContrastChangeDataset(valid_ds)
-    test_ds = ContrastChangeDataset(test_ds)
+    train_ds, valid_ds, test_ds = random_split(
+        all_windows,
+        lengths=[train_len, valid_len, test_len],
+        generator= torch.Generator().manual_seed(2025)
+    )
 
     print(f"Train / Valid / Test sizes: {len(train_ds)} / {len(valid_ds)} / {len(test_ds)}")
 
@@ -417,33 +566,40 @@ def main():
     train_loader = DataLoader(train_ds, 
                               batch_size=args.batch_size, 
                               shuffle=True, 
-                              num_workers=args.num_workers)
+                              num_workers=args.num_workers,
+                              pin_memory=args.pin_memory,
+                              collate_fn=collate_fn)
     valid_loader = DataLoader(valid_ds, 
                               batch_size=args.batch_size, 
                               shuffle=False, 
                               num_workers=args.num_workers, 
-                              pin_memory=True)
+                              pin_memory=args.pin_memory,
+                              collate_fn=collate_fn)
     test_loader = DataLoader(test_ds,
                                 batch_size=args.batch_size, 
                                 shuffle=False, 
                                 num_workers=args.num_workers, 
-                                pin_memory=True)
+                                pin_memory=args.pin_memory,
+                                collate_fn=collate_fn)
 
+    ## Declaring the model and training
     # 6) Model (EegMamba JEPA backbone + linear head)
-    n_chans = 129
-    n_times = int(WINDOW_SEC * SFREQ)
+    n_channels = 129
+
     # JEPA expects (B, C, T) input; patch_size chosen to roughly match original code (10)
-    model = FinetuneJEPA(n_chans=n_chans, 
-                         d_model=args.d_model, 
-                         n_layer=args.n_layers, 
-                         patch_size=args.patch_size).to(device)
+    model = FinetuneJEPA_Challenge2(n_channels=n_channels, 
+                                    d_model=args.d_model,
+                                    n_layer=args.n_layers, 
+                                    patch_size=args.patch_size, 
+                                    meta_dim=META_DIM).to(device)
+
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = CosineLRScheduler(optimizer,
                                   cosine_epochs = args.epochs,
                                   warmup_epochs = args.warmup_epochs,
-    )
-    loss_fn = torch.nn.MSELoss()
+                            )
+    loss_fn = mdn_loss    
     load_finetune = True
     start_epoch = 1
     
@@ -494,7 +650,7 @@ def main():
     if args.amp and not use_amp:
         print("--amp requested but CUDA is not available; proceeding without AMP.")
     scaler = torch.cuda.amp.GradScaler() if use_amp else None
-    writer = SummaryWriter(log_dir = Path(args.log_dir) / f"finetune_challenge1_{int(time.time())}")
+    writer = SummaryWriter(log_dir = Path(args.log_dir) / f"finetune_challenge2_{int(time.time())}")
 
     # use_scaler = (autocast_dtype is not None) and (scaler is not None)
     best_rmse = float('inf')
@@ -502,15 +658,20 @@ def main():
 
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
     for epoch in range(start_epoch, args.epochs + 1):
+        phase = "backbone" if epoch <= args.epochs_meta else "head"
+
         train_loss, train_rmse = train_one_epoch(
             model, train_loader, loss_fn, optimizer, scheduler, scaler,
-            device, epoch, writer, use_amp=use_amp
+            device, epoch, writer, use_amp=use_amp, phase=phase
         )
         val_loss, val_rmse = validate(
-            model, valid_loader, loss_fn, device, epoch, writer, use_amp=use_amp
+            model, valid_loader, device, epoch, writer, use_amp=use_amp, phase=phase
         )
+
         print(f"Epoch {epoch}: Train RMSE={train_rmse:.4f}, Val RMSE={val_rmse:.4f}")
+
         if val_rmse < best_rmse:
             best_rmse = val_rmse
             best_state = copy.deepcopy(model.state_dict())
@@ -532,8 +693,12 @@ def main():
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    torch.save(model.state_dict(), args.out)
-    print(f"Saved best model (val RMSE={best_rmse:.4f}) to {args.out}")
+    # Check the parent directory exists
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    torch.save(model.state_dict(), out_path)
+    print(f"Saved best model (val RMSE={best_rmse:.4f}) to {out_path}")
 
     # Load the weighst with best validation RMSE and evaluate on test set
     test_loss, test_rmse = validate(

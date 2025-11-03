@@ -252,3 +252,56 @@ class EegMambaJEPA(nn.Module):
         if self.target_model is None:
             raise ValueError("Target model not attached. Call attach_target() first.")
         return self.target_model(x)
+
+
+class EnsembleCompetitionModel(nn.Module):
+    def __init__(self, backbones, head):
+        """
+        Wrapper to average backbone features before passing to the head.
+        Used during fine-tuning and submission inference.
+        Args:
+            backbones (list or nn.ModuleList): List of pre-trained backbone models.
+            head (nn.Module): The final head (e.g., nn.Linear or MDNHead).
+        """
+        super().__init__()
+        # Ensure backbones is a ModuleList to register them correctly
+        if not isinstance(backbones, nn.ModuleList):
+            self.backbones = nn.ModuleList(backbones)
+        else:
+            self.backbones = backbones
+        self.head = head
+
+    def forward(self, x):
+        """
+        Args:
+            x (Tensor): Input EEG data (B, C, T).
+        Returns:
+            Tensor or Tuple: Output from the head (depends on the head type).
+        """
+        # Get CLS token features from all backbones
+        features = []
+        is_head_training = self.head.training # Check head status before changing backbone mode
+
+        for bb in self.backbones:
+            # Important: Ensure backbones are in eval mode if their weights are frozen
+            # (which they are during fine-tuning and inference)
+            original_bb_mode = bb.training
+            if not any(p.requires_grad for p in bb.parameters()):
+                 bb.eval() # Set to eval if frozen
+
+            features.append(bb(x))
+
+            # Restore original mode if it was changed
+            if not any(p.requires_grad for p in bb.parameters()) and original_bb_mode:
+                 bb.train() # Set back to train if it was originally training (shouldn't happen here)
+
+
+        # Average the features across the ensemble dimension
+        avg_features = torch.mean(torch.stack(features), dim=0)
+
+        # Pass averaged features through the head
+        # Ensure head is in the correct mode (train/eval)
+        self.head.train(is_head_training) # Match head mode to original input mode
+        output = self.head(avg_features)
+
+        return output

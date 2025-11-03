@@ -34,3 +34,5 @@ preprocessed/*
 finetune_weight/*
 finetune_weight/
 
+checkpoints_challenge2/
+checkpoints_challenge2/*

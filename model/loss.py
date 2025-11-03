@@ -85,3 +85,38 @@ class VICReg(nn.Module):
         return loss
 
 
+
+
+def mdn_loss(pi, sigma, mu, y, reduce=True):
+    """Calculates the Mixture Density Network loss."""
+    # Ensure y has the correct shape for broadcasting: (B, 1)
+    if y.dim() == 1: y = y.unsqueeze(-1)
+    if y.dim() == 2 and y.shape[1] != 1:
+        raise ValueError(f"Target y must be shape (B,) or (B, 1), but got {y.shape}")
+
+    # Create the mixture distribution
+    # Normal distribution component: N(mu | sigma^2)
+    m = torch.distributions.Normal(loc=mu, scale=sigma)
+
+    # Calculate the log probability density for each component
+    # log N(y | mu_k, sigma_k^2)
+    # y broadcasts from (B, 1) to (B, N_COMPONENTS)
+    log_prob = m.log_prob(y)
+
+    # Ensure log_prob is numerically stable (clamp potential -inf)
+    log_prob = torch.clamp(log_prob, min=-1e9, max=1e9) # Also clamp max for stability
+
+    # Calculate log mixture weights (log pi_k) using log_softmax for stability
+    log_pi = torch.log_softmax(pi, dim=1)
+
+    # Combine using log-sum-exp for stability: log( sum[ pi_k * N(y | ...) ] )
+    # logsumexp( log(pi_k) + log N(y | ...) )
+    log_likelihood = torch.logsumexp(log_pi + log_prob, dim=1)
+
+    # Negative log likelihood loss
+    loss = -log_likelihood
+
+    if reduce:
+        return loss.mean()
+    else:
+        return loss
