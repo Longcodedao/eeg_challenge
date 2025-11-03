@@ -187,6 +187,19 @@ class EegMambaJEPA(nn.Module):
         x: (B, C, T)
         returns: (B, d_model)  -- embedding for CLS token
         """
+
+        B, C, T = x.shape
+
+        # --- START: Per-Window Standardization ---
+        # This is the "transformation inside the model"
+        # It ensures train/test data are identically normalized (z-score).
+        # We calculate mean/std per sample (B), across channels (C) and time (T)
+        mean = torch.mean(x, dim=(1, 2), keepdim=True)
+        std = torch.std(x, dim=(1, 2), keepdim=True)
+        x = (x - mean) / (std + 1e-6)  # Add epsilon to prevent division by zero
+        
+        # --- END: Per-Window Standardization ---
+
         # Embed patches
         x = self.patch_embed(x)  # (B, NumPatches, d_model)
 
