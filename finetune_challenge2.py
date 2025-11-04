@@ -509,14 +509,25 @@ def main():
     
     if args.use_preprocessed:
         print(f"Using preprocessed files under {preproc_root}. Skipping preprocess step.")
+        list_windows = []
+        total = len(releases) * len(args.task)
+        pbar = tqdm(total=total, desc="Loading preprocessed windows")
+        
         for rel in releases:
             for task in args.task:
+                load_path = preproc_root / f"{rel}_windows_task[{task}].pkl"
                 try:
-                    load_path = preproc_root / f"{rel}_windows_task[{task}].pkl"
                     windows = joblib.load(load_path)
                     list_windows.append(windows)
+                    pbar.set_postfix({'Loaded': f"{rel}/{task}"})
                 except Exception as e:
-                    print(f"Warning: failed to load preprocessed windows for release {rel}: {e}")
+                    print(f"Warning: failed to load preprocessed windows for release {rel}, task {task}: {e}")
+                finally:
+                    pbar.update(1)
+        
+        pbar.close()
+        print(f"Loaded {len(list_windows)} preprocessed window datasets.")
+
     else:
         print("Running preprocessing (this may take a while).")
      
@@ -541,6 +552,7 @@ def main():
                 ) for ds in windows.datasets
                 ]
             )
+            print(len(windows_ds))
 
             list_windows.append(windows_ds)
             save_directory = preproc_root / f"{ds.release}_windows_task[{ds.description['task'].unique().item()}].pkl"
@@ -599,6 +611,14 @@ def main():
                                   cosine_epochs = args.epochs,
                                   warmup_epochs = args.warmup_epochs,
                             )
+    # Setup AMP (automatic mixed precision) if requested and running on CUDA
+    use_amp = bool(args.amp) and (device.type == 'cuda')
+    if args.amp and not use_amp:
+        print("--amp requested but CUDA is not available; proceeding without AMP.")
+    writer = SummaryWriter(log_dir = Path(args.log_dir) / f"finetune_challenge2_{int(time.time())}")
+
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+
     loss_fn = mdn_loss    
     load_finetune = True
     start_epoch = 1
@@ -644,13 +664,6 @@ def main():
 
         model.backbone.load_state_dict(model_state, strict = False)            
 
-
-    # Setup AMP (automatic mixed precision) if requested and running on CUDA
-    use_amp = bool(args.amp) and (device.type == 'cuda')
-    if args.amp and not use_amp:
-        print("--amp requested but CUDA is not available; proceeding without AMP.")
-    scaler = torch.cuda.amp.GradScaler() if use_amp else None
-    writer = SummaryWriter(log_dir = Path(args.log_dir) / f"finetune_challenge2_{int(time.time())}")
 
     # use_scaler = (autocast_dtype is not None) and (scaler is not None)
     best_rmse = float('inf')

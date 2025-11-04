@@ -50,20 +50,41 @@ python finetune_challenge1.py \
 
 
 python finetune_challenge2.py \
-    --data-root MyEEGData_mini/ \
-    --release R1 \
+    --data-root MyNeurIPSData/MyNeurIPSData/HBN_DATA_FULL/ \
+    --release R5 \
     --preproc-root preprocessed \
-    --mini \
-    --weight-path finetune_weight/pretrain_epoch020.pt \
+    --weight-path checkpoints/pretrain_epoch020.pt \
     --log-dir ./logs \
-    --batch-size 2048 \
+    --batch-size 8192 \
     --epochs 10 \
     --epochs-meta 5 \
+    --lr 1e-4 \
+    --num-workers 4 \
+    --checkpoint-interval 2 \
+    --out ./output/finetune_challenge2.pt \
+    --checkpoint-dir ./checkpoints_challenge2 \
+    --preproc-root ./preproc_challenge2 \
+    --amp \
+    --use-preprocessed
+
+# After training for 2 epochs then use this 
+python finetune_challenge2.py \
+    --data-root MyNeurIPSData/MyNeurIPSData/HBN_DATA_FULL/ \
+    --release R5 \
+    --preproc-root preprocessed \
+    --weight-path checkpoints/pretrain_epoch020.pt \
+    --log-dir ./logs \
+    --batch-size 8192 \
+    --epochs 4 \
+    --epochs-meta 0 \
     --lr 1e-4 \
     --num-workers 4 \
     --checkpoint-interval 1 \
     --out ./output/finetune_challenge2.pt \
     --checkpoint-dir ./checkpoints_challenge2 \
+    --checkpoint \
+    --preproc-root ./preproc_challenge2 \
+    --amp \
     --use-preprocessed
 
 
