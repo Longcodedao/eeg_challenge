@@ -1,0 +1,4 @@
+python preprocess_challenge2.py \
+     --data-root ../MyEEGData_full \
+     --preproc-root ../preprocess_data/challenge2 \
+     --release R5 

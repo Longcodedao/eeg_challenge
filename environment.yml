@@ -7,9 +7,8 @@ dependencies:
   - python=3.10
   - pip
   - pytorch
-  - cpuonly
-  # - pytorch-cuda=12.4  # requires NVIDIA driver >= 550
-  # - cudnn
+  - pytorch-cuda=12.4  # requires NVIDIA driver >= 550
+  - cudnn
   - numpy
   - pandas
   - scikit-learn

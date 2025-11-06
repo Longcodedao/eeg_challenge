@@ -49,23 +49,24 @@ python finetune_challenge1.py \
     --checkpoint
 
 
-python finetune_challenge2.py \
-    --data-root MyNeurIPSData/MyNeurIPSData/HBN_DATA_FULL/ \
-    --release R5 \
-    --preproc-root preprocessed \
-    --weight-path checkpoints/pretrain_epoch020.pt \
-    --log-dir ./logs \
-    --batch-size 8192 \
-    --epochs 10 \
-    --epochs-meta 5 \
-    --lr 1e-4 \
-    --num-workers 4 \
-    --checkpoint-interval 2 \
-    --out ./output/finetune_challenge2.pt \
-    --checkpoint-dir ./checkpoints_challenge2 \
-    --preproc-root ./preproc_challenge2 \
-    --amp \
-    --use-preprocessed
+torchrun --standalone \
+        --nproc_per_node=4 \
+        finetune_c2_new.py \
+        --data-root preprocess_data/challenge2/ \
+        --release R5 \
+        --weight-path weight_EEG/pretrain_epoch020.pt \
+        --log-dir ./logs \
+        --batch-size 8192 \
+        --epochs 50 \
+        --warmup-epochs 10 \
+        --epochs-meta 25 \
+        --lr 1e-3 \
+        --num-workers 4 \
+        --checkpoint-interval 10 \
+        --out ./output/finetune_challenge2.pt \
+        --checkpoint-dir ./checkpoints_challenge2 \
+        --checkpoint --amp
+
 
 # After training for 2 epochs then use this 
 python finetune_challenge2.py \

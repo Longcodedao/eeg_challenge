@@ -25,9 +25,10 @@ import copy
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 
 from sklearn.utils import check_random_state
+from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
 from lr_scheduler import CosineLRScheduler
@@ -56,8 +57,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torchmetrics import MetricCollection, MeanMetric, Accuracy
 from torch.amp import autocast, GradScaler
 from model.meta_encoder import MetaEncoder
-from model.mdn import MDNHead
-from model.loss import mdn_loss
+from model.mdn import MDNHead, mdn_loss
 import torch.nn.functional as F
 
 SFREQ = 100
@@ -452,6 +452,8 @@ def main():
     # 1) Load the per-task EEGChallengeDataset
     # Support multiple releases: load datasets for each release and concatenate their recordings
     releases = args.release if isinstance(args.release, (list, tuple)) else [args.release]
+    tasks = args.task if isinstance(args.task, (list, tuple)) else [args.task]
+    
     print(f"Loading EEGChallengeDataset task={args.task}, releases={releases}")
 
     all_subdatasets = []
@@ -497,14 +499,6 @@ def main():
     # 2) Optionally preprocess (if user didn't provide preprocessed files)
     preproc_root = Path(args.preproc_root) if args.preproc_root else data_root / 'preprocessed'
     preproc_root.mkdir(parents=True, exist_ok=True)
-
-    # if args.use_preprocessed:
-    #     print(f"Using preprocessed files under {preproc_root}. Skipping preprocess step.")
-    # else:
-    #     print("Running preprocessing (this may take a while).")
-    #     preprocessors = build_offline_preprocessors(sfreq=args.sfreq)
-    #     for ds in all_subdatasets:
-    #         preprocess(ds, preprocessors, n_jobs=-1, save_dir=preproc_root, overwrite=False)
     list_windows = []
     
     if args.use_preprocessed:
@@ -560,19 +554,34 @@ def main():
 
     all_windows = BaseConcatDataset(list_windows)
 
-    # 4) Random split by lengths
-    total_len = len(all_windows)
-    train_len = int(0.8 * total_len)
-    valid_len = int(0.1 * total_len)
-    test_len = total_len - train_len - valid_len
+    # 4) Random split by subjects
+    list_subjects = []
+    for ds in all_windows.datasets:
+        subject = ds.windows_ds.description['subject']
+        list_subjects.append(subject)
 
-    train_ds, valid_ds, test_ds = random_split(
-        all_windows,
-        lengths=[train_len, valid_len, test_len],
-        generator= torch.Generator().manual_seed(2025)
+    subjects = list(set(list_subjects))
+
+    total_len = len(subjects)
+
+    valid_frac = 0.1
+    test_frac = 0.1
+    seed = 2025
+    
+    train_subj, valid_test_subj = train_test_split(
+        subjects, test_size=(valid_frac + test_frac), random_state=seed
     )
+    # train_len = int(0.8 * total_len)
+    # valid_len = int(0.1 * total_len)
+    # test_len = total_len - train_len - valid_len
 
-    print(f"Train / Valid / Test sizes: {len(train_ds)} / {len(valid_ds)} / {len(test_ds)}")
+    # train_ds, valid_ds, test_ds = random_split(
+    #     all_windows,
+    #     lengths=[train_len, valid_len, test_len],
+    #     generator= torch.Generator().manual_seed(2025)
+    # )
+
+    # print(f"Train / Valid / Test sizes: {len(train_ds)} / {len(valid_ds)} / {len(test_ds)}")
 
     # 5) DataLoaders
     train_loader = DataLoader(train_ds, 

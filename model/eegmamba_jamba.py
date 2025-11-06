@@ -4,6 +4,7 @@ import torch.nn as nn
 from mamba_ssm import Mamba
 from einops import rearrange
 import copy
+from .mdn import MDNHead
 
 # --- Patch Embedding Layer ---
 class PatchEmbed(nn.Module):
@@ -305,3 +306,85 @@ class EnsembleCompetitionModel(nn.Module):
         output = self.head(avg_features)
 
         return output
+
+
+class FinetuneJEPA_Challenge2(nn.Module):
+    def __init__(self, n_channels=129, d_model=256, n_layer=8, patch_size=10, meta_dim=13):
+        super().__init__()
+        self.backbone = EegMambaJEPA(
+            n_channels=n_channels,
+            d_model=d_model,
+            n_layer=n_layer,
+            patch_size=patch_size,
+        )
+        self.meta_proj = nn.Linear(meta_dim, d_model)
+
+        # MDN Heads
+        self.train_head = MDNHead(input_dim=d_model * 2, n_mixtures=3)
+        self.submit_head = MDNHead(input_dim=d_model, n_mixtures=3)
+
+        # MODE
+        self.mode = "train"  # "train", "val", "submit"
+
+        # New: Dummy parameter to ensure submission head is always used in training
+        # This is a common DDP trick for models with conditional branches.
+        self.dummy_param = nn.Parameter(torch.empty(1))
+        nn.init.constant_(self.dummy_param, 0.0)
+        
+        # New: Register the metadata tensor for backward pass in the submit phase
+        self.register_buffer('_meta_zero', torch.zeros(1, meta_dim))
+
+    def forward(self, x, meta=None):
+        z = self.backbone(x)  # (B, d_model)
+        batch_size = z.shape[0]
+
+        # Prepare the metadata
+        if meta is None:
+            meta_input = self._meta_zero.expand(batch_size, -1)  # (B, meta_dim)
+        else:
+            meta_input = meta
+
+        m = self.meta_proj(meta_input)  # (B, d_model)
+        z_train = torch.cat([z, m], dim=1)  # (B, d_model * 2)
+
+        # ALways call both heads to ensure all parameters are used in backward
+        pi_train, sigma_train, mu_train = self.train_head(z_train)
+        pi_submit, sigma_submit, mu_submit = self.submit_head(z)
+
+        # Return the appropriate head output based on the mode
+        if self.mode == "train":
+            if meta is not None:
+                return pi_train, sigma_train, mu_train
+            else:
+                return pi_submit, sigma_submit, mu_submit
+        else:
+            # EVALUATION / SUBMISSION: Return single number
+            # Option 1: Mean of mixture (weighted)
+            pred = (pi_submit * mu_submit).sum(dim=1)  # (B,)
+            # Option 2: Best component (highest pi)
+            # best_k = pi_submit.argmax(dim=1)
+            # pred = mu_submit.gather(1, best_k.unsqueeze(1)).squeeze(1)
+            return pred
+
+    # SWITCH MODES
+    def train_mode(self):
+        self.mode = "train"
+        self.train()
+
+    def eval_mode(self):
+        self.mode = "val"
+        self.eval()
+
+    def submit_mode(self):
+        self.mode = "submit"
+        self.eval()
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+        print("BACKBONE FROZEN. SUBMISSION READY.")
+
+    # FREEZE BACKBONE
+    def freeze_backbone(self):
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+
+

@@ -43,3 +43,4 @@ class MDNHead(nn.Module):
         sigma = self.softplus(self.sigma(x)) + self.min_sigma
 
         return pi, sigma, mu
+
