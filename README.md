@@ -1,204 +1,89 @@
+# EEG Challenge 2025 
 
+# EEG Challenge 2025
 
-# EEG Foundation Challenge Start Kits
+This repository implements Mamba / JEPA-style pretraining and downstream fine-tuning for:
+- Challenge 1 (Contrast Change Detection) — regression of response time
+- Challenge 2 (Externalizing factor) — MDN-based regression
 
-This repository contains start kits for the [EEG Foundation challenges](https://eeg2025.github.io), a NeurIPS 2025 competition focused on advancing EEG decoding through cross-task transfer learning and externalizing prediction.
+Quick links
+- Pretraining script: [pretrain.py](pretrain.py) — see [`pretrain.main`](pretrain.py)  
+- Fine-tune (Challenge 1): [finetune_challenge1.py](finetune_challenge1.py) — uses [`finetune_challenge1.FinetuneJEPA`](finetune_challenge1.py)  
+- Fine-tune (Challenge 2): [finetune_challenge2.py](finetune_challenge2.py) (single-GPU) and [finetune_c2_new.py](finetune_c2_new.py) (DDP / multi-GPU) — see [`finetune_challenge2.main`](finetune_challenge2.py) and [`finetune_c2_new.main`](finetune_c2_new.py)  
+- Model code and heads: [model/eegmamba_jamba.py](model/eegmamba_jamba.py) (`[`model.EegMambaJEPA`](model/eegmamba_jamba.py)`, `[`model.FinetuneJEPA_Challenge2`](model/eegmamba_jamba.py)`) and [model/mdn.py](model/mdn.py) (`[`model.MDNHead`](model/mdn.py)`)  
+- Preprocessing helper: [preprocessing/preprocess_challenge2.py](preprocessing/preprocess_challenge2.py) (`[`preprocessing.preprocess_and_window`](preprocessing/preprocess_challenge2.py)`)  
+- Utilities: [utils.py](utils.py) (dataset split & collate)  
+- Example submission loader: [submission_longdang.py](submission_longdang.py)  
+- Example full training orchestrator: [JEMA-EEG25-Full-Training.py](JEMA-EEG25-Full-Training.py)  
+- Useful commands and examples: [commandline.txt](commandline.txt)  
+- Notebooks / logs: [experiment_abc.ipynb](experiment_abc.ipynb), [creating_weight.ipynb](creating_weight.ipynb), logs/ and output/
 
-## 🚀 Quick Start
+Overview
 
-### Challenge 1: Cross-Task Transfer Learning
-<a target="_blank" href="https://colab.research.google.com/github/eeg2025/startkit/blob/main/challenge_1.ipynb">
-  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Challenge 1 start-kit"/>
-</a>
+1. Pretraining (self-supervised JEPA / Mamba)
+   - Script: [pretrain.py](pretrain.py) (`[`pretrain.main`](pretrain.py)`)  
+   - Goal: train a JEPA / Mamba backbone (encoder) over many EEG releases/tasks to produce transferable backbone weights.  
+   - Backbone: [`model.EegMambaJEPA`](model/eegmamba_jamba.py).  
+   - Head(s): VICReg / MDN components used depending on config (see [pretrain.py](pretrain.py) and [model/mdn.py](model/mdn.py)).  
+   - Output: checkpoint files saved to checkpoint dir (pretrain_epoch*.pt). Use these weights for fine-tuning.
 
-**Goal:** Develop models that can effectively transfer knowledge from passive EEG tasks to active cognitive tasks.
+2. Preprocessing & windowing
+   - Script: [preprocessing/preprocess_challenge2.py](preprocessing/preprocess_challenge2.py) (`[`preprocessing.preprocess_and_window`](preprocessing/preprocess_challenge2.py)`)  
+   - Purpose: convert raw EEG caches (EEGChallengeDataset) into fixed-length windows, fit a MetaEncoder (task/age/sex → vector), and save per-release window pickles.  
+   - The produced files (e.g., `R5_windows_task[RestingState].pkl`) are consumed by fine-tuning scripts. See [preprocessing/run_preprocess.txt](preprocessing/run_preprocess.txt).
 
-### Challenge 2: Predicting the externalizing factor from EEG
-<a target="_blank" href="https://colab.research.google.com/github/eeg2025/startkit/blob/main/challenge_2.ipynb">
-  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Challenge 2 start-kit"/>
-</a>
+3. Fine-tuning — Challenge 1 (CCD)
+   - Script: [finetune_challenge1.py](finetune_challenge1.py) (`[`finetune_challenge1.FinetuneJEPA`](finetune_challenge1.py)`)  
+   - Setup: load backbone weights (from pretraining), attach a simple regression head, split subjects (train/val/test), run MSE-based training.  
+   - Typical invocation examples: see [commandline.txt](commandline.txt) — adjust `--weight-path`, `--preproc-root`, batch size, epochs.  
+   - Output: best fine-tuned state saved (out path). The submission helper [submission_longdang.py](submission_longdang.py) shows how to load a saved Challenge 1 model.
 
-**Goal:** Predict the externalizing factor from EEG recordings to enable objective mental health assessments.
+4. Fine-tuning — Challenge 2 (Externalizing factor)
+   - Single-GPU script: [finetune_challenge2.py](finetune_challenge2.py) — supports MDN training with meta-information.  
+   - Multi-GPU / DDP: [finetune_c2_new.py](finetune_c2_new.py) — distributed training, uses `torchrun` examples in [commandline.txt](commandline.txt).  
+   - Model wrapper: [`model.FinetuneJEPA_Challenge2`](model/eegmamba_jamba.py) implements:
+     - MDN heads for training (`[`model.MDNHead`](model/mdn.py)`) and submission-time prediction.
+     - Mode switching: `train_mode()`, `eval_mode()`, `submit_mode()` — used by training & evaluation routines.
+   - Loss: MDN negative log-likelihood (see [`model.mdn`](model/mdn.py) / [`model.loss.mdn_loss`](model/loss.py) where applicable).
+   - Fine-tune flow (DDP script): preprocessing → load meta encoder → create CropMetaWrapper datasets (random 2s crops) → DDP dataloaders (`DistributedSampler`) → training loop with per-epoch validation and checkpointing. See [`finetune_c2_new.main`](finetune_c2_new.py).
 
-## 📁 Repository Structure
+Quickstart (local / single-GPU)
+- Preprocess (if needed):
+  - python preprocessing/preprocess_challenge2.py --data-root <RAW_ROOT> --preproc-root <OUT_DIR> --release R5
+  - (See [preprocessing/run_preprocess.txt](preprocessing/run_preprocess.txt))
+- Pretrain (example):
+  - python pretrain.py --data-root <DATA_ROOT> --release R1 R2 ... --epochs 50 --batch-size 256 --checkpoint-dir checkpoints/
+- Fine-tune Challenge 1:
+  - python finetune_challenge1.py --data-root <PREPROC_ROOT> --preproc-root <PREPROC_ROOT> --weight-path checkpoints/pretrain_epoch020.pt ...
+- Fine-tune Challenge 2 (single GPU):
+  - python finetune_challenge2.py --data-root <PREPROC_ROOT> --weight-path checkpoints/pretrain_epoch020.pt ...
+- Fine-tune Challenge 2 (DDP / multi-GPU):
+  - torchrun --standalone --nproc_per_node=4 finetune_c2_new.py --data-root preprocess_data/challenge2/ --weight-path weight_EEG/pretrain_epoch020.pt ...  
+  - Example in [commandline.txt](commandline.txt)
 
-### Main Files
+Useful files and symbols
+- [pretrain.py](pretrain.py) (`[`pretrain.main`](pretrain.py)`) — pretraining pipeline  
+- [preprocessing/preprocess_challenge2.py](preprocessing/preprocess_challenge2.py) (`[`preprocessing.preprocess_and_window`](preprocessing/preprocess_challenge2.py)`) — windowing & meta encoder  
+- [finetune_challenge1.py](finetune_challenge1.py) (`[`finetune_challenge1.FinetuneJEPA`](finetune_challenge1.py)`) — Challenge 1 finetune  
+- [finetune_challenge2.py](finetune_challenge2.py) (`[`finetune_challenge2.main`](finetune_challenge2.py)`) — Challenge 2 single-GPU  
+- [finetune_c2_new.py](finetune_c2_new.py) (`[`finetune_c2_new.main`](finetune_c2_new.py)`) — Challenge 2 DDP multi-GPU  
+- [model/eegmamba_jamba.py](model/eegmamba_jamba.py) (`[`model.EegMambaJEPA`](model/eegmamba_jamba.py)`, `[`model.FinetuneJEPA_Challenge2`](model/eegmamba_jamba.py)`) — architectures  
+- [model/mdn.py](model/mdn.py) (`[`model.MDNHead`](model/mdn.py)`) — MDN head implementation  
+- [utils.py](utils.py) — dataset splitting & collate helpers used in DDP script  
+- [submission_longdang.py](submission_longdang.py) — inference / submission helper showing model loading
 
-- **`challenge_1.ipynb`** - Complete tutorial for Challenge 1: Cross-task transfer learning
-  - Understanding the Contrast Change Detection (CCD) task
-  - Loading and preprocessing EEG data using EEGDash
-  - Building deep learning models with Braindecode
-  - Training and evaluation pipeline
+Repro & logging
+- TensorBoard logs are saved under logs/ (see examples in logs/).  
+- Checkpoints saved under checkpoint directories specified by script flags. See examples in [commandline.txt](commandline.txt).
 
-- **`challenge_1.py`** - Python script version of Challenge 1 notebook for easier integration
+Notes & tips
+- Pretrained backbone weights from pretraining are used to initialize fine-tuning backbones (loaded leniently with strict=False so heads can differ). See how weight loading is performed in [finetune_challenge2.py](finetune_challenge2.py) and [finetune_c2_new.py](finetune_c2_new.py).
+- Challenge 2 uses metadata (task/age/sex) encoded by a MetaEncoder fit during preprocessing. The encoder is saved with the preprocessed outputs and loaded by the fine-tune scripts.
+- For DDP runs, ensure CUDA + NCCL available and launch with `torchrun` (examples in [commandline.txt](commandline.txt)).
 
-- **`challenge_2.ipynb`** - Tutorial for Challenge 2: Externalizing factor regression
-  - Understanding the externalizing factor regression task
-  - Data loading and windowing strategies
-  - Model training for externalizing factor prediction
+Contact / further exploration
+- Inspect example experiments and EDA in [experiment_abc.ipynb](experiment_abc.ipynb) and [creating_weight.ipynb](creating_weight.ipynb).  
+- For a one-file orchestrator, see [JEMA-EEG25-Full-Training.py](JEMA-EEG25-Full-Training.py).
 
-- **`challenge_2.py`** - Python script version of Challenge 2 notebook for easier integration
-
-- **`submission.py`** - Template for competition submission
-  - Shows required format for model submission
-  - Includes examples for both challenges
-
-- **`requirements.txt`** - Python dependencies needed to run the notebooks
-
-- **`submission.py`** - Example of local inference to allow you to do your tests.
-
-
-### Advanced Examples (not_ready_yet/)
-
-- **`challenge_2_self_supervised.ipynb`** - Advanced self-supervised learning approach
-  - Implementing Relative Positioning (RP) for unsupervised representation learning
-  - Fine-tuning for externalizing factor prediction
-  - PyTorch Lightning integration
-  - *Note: This is an advanced example that may require additional setup*
-
-## 🛠️ Installation
-
-```bash
-pip install -r requirements.txt
-```
-
-Main dependencies:
-- `braindecode` - Deep learning library for EEG
-- `eegdash` - Dataset management and preprocessing
-- `pytorch` - Deep learning framework
-
-## 🤝 Community & Support
-
-This is a community competition with a strong open-source foundation. If you see something that doesn't work or could be improved:
-
-1. **Please be kind** - we're all working together
-2. Open an issue in the [issues tab](https://github.com/eeg2025/startkit/issues)
-3. Join our weekly support sessions (starting 08/09/2025)
-
-The entire decoding community will only go further when we stop solving the same problems over and over again, and start working together!
-
-
-## 📚 Resources
-
-- [Competition Website](https://eeg2025.github.io)
-- [EEGDash Documentation](https://eeglab.org/EEGDash/overview.html)
-- [Braindecode Models](https://braindecode.org/stable/models/models_table.html)
-- [Dataset Download Guide](https://eeg2025.github.io/data/#downloading-the-data)
-
-
-## Cluster dependencies
-
-The dependencies that are available for inference are described below. If you need anything unavailable, we suggest you zip them together in the submission and put them inside your submission folder.
-
-
-```bash
-Package                      Version
----------------------------- ------------
-acres                        0.5.0
-aiobotocore                  2.24.2
-aiohappyeyeballs             2.6.1
-aiohttp                      3.12.15
-aioitertools                 0.12.0
-aiosignal                    1.4.0
-async-timeout                5.0.1
-attrs                        25.3.0
-axial_positional_embedding   0.3.12
-bids-validator               1.14.7.post0
-bidsschematools              1.1.0
-botocore                     1.40.18
-braindecode                  1.2.0
-certifi                      2025.8.3
-cffi                         2.0.0
-charset-normalizer           3.4.3
-click                        8.2.1
-CoLT5-attention              0.11.1
-contourpy                    1.3.2
-cycler                       0.12.1
-decorator                    5.2.1
-dnspython                    2.8.0
-docopt                       0.6.2
-docstring-inheritance        2.2.2
-eegdash                      0.3.8
-eeglabio                     0.1.0
-einops                       0.8.1
-filelock                     3.19.1
-fonttools                    4.59.2
-formulaic                    1.2.0
-frozendict                   2.4.6
-frozenlist                   1.7.0
-fsspec                       2025.9.0
-greenlet                     3.2.4
-h5io                         0.2.5
-h5py                         3.14.0
-idna                         3.10
-importlib_resources          6.5.2
-interface-meta               1.3.0
-Jinja2                       3.1.6
-jmespath                     1.0.1
-joblib                       1.5.2
-kiwisolver                   1.4.9
-lazy_loader                  0.4
-lightning                    2.5.5
-lightning-utilities          0.15.2
-linear-attention-transformer 0.19.1
-linformer                    0.2.3
-llvmlite                     0.44.0
-local-attention              1.10.0
-MarkupSafe                   3.0.2
-matplotlib                   3.10.6
-mne                          1.10.1
-mne-bids                     0.17.0
-mpmath                       1.3.0
-multidict                    6.6.4
-narwhals                     2.4.0
-networkx                     3.4.2
-nibabel                      5.3.2
-num2words                    0.5.14
-numba                        0.61.2
-numpy                        2.2.6
-packaging                    25.0
-pandas                       2.3.2
-pillow                       11.3.0
-pip                          25.2
-platformdirs                 4.4.0
-pooch                        1.8.2
-product_key_memory           0.2.11
-propcache                    0.3.2
-pybids                       0.19.0
-pycparser                    2.23
-pymatreader                  1.1.0
-pymongo                      4.15.0
-pyparsing                    3.2.3
-python-dateutil              2.9.0.post0
-python-dotenv                1.1.1
-pytorch-lightning            2.5.5
-pytz                         2025.2
-PyYAML                       6.0.2
-requests                     2.32.5
-s3fs                         2025.9.0
-scikit-learn                 1.7.2
-scipy                        1.15.3
-setuptools                   78.1.1
-six                          1.17.0
-skorch                       1.2.0
-soundfile                    0.13.1
-SQLAlchemy                   2.0.43
-sympy                        1.14.0
-tabulate                     0.9.0
-threadpoolctl                3.6.0
-torch                        2.2.2
-torchaudio                   2.2.2
-torchinfo                    1.8.0
-torchmetrics                 1.8.2
-tqdm                         4.67.1
-typing_extensions            4.15.0
-tzdata                       2025.2
-universal_pathlib            0.2.6
-urllib3                      2.5.0
-wfdb                         4.3.0
-wheel                        0.45.1
-wrapt                        1.17.3
-xarray                       2025.6.1
-xmltodict                    0.15.1
-yarl                         1.20.1
-```
+License / citation
+- (Add project license and citation here.)

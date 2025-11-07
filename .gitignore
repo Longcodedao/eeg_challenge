@@ -39,3 +39,6 @@ checkpoints_challenge2/*
 
 preprocess_data/challenge2/
 preprocess_data/challenge2/*
+
+.venv/
+.venv/*
