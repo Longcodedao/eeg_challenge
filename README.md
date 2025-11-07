@@ -61,8 +61,15 @@ failing to capture its multimodality. There are several ways to improve that:
 To get started with the challenge, follow these two steps:
 
 1.  **Install Dependencies**:
+
+    **Prerequisite**: Getting uv for creating virtual environment
     ```bash
-    pip install -r requirements.txt --no-build-isolation
+    pip install uv
+    uv venv --python 3.12 .venv
+    source .venv/bin/activate 
+
+    uv pip install -r requirements.txt 
+    uv pip install mamba-ssm --no-build-isolation
     ```
     Use no build isolation because Mamba may enters difficulties when building from source or installing from PyPi
 

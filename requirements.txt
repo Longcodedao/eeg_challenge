@@ -1,3 +1,5 @@
+setuptools
+wheel
 numpy
 pandas
 scikit-learn
@@ -16,4 +18,3 @@ tensorboard
 eegdash
 braindecode
 lightning
-mamba-ssm=2.2.4
