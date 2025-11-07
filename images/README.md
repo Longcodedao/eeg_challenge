@@ -11,7 +11,7 @@ This is the visualization of the result of training model
 
     The formula for that is:
 
-    $$\eqalign{\pi_{\text{max}} = \max_k \pi_k \quad \text{where} \quad \pi_k = \frac{\exp(z_k)}{\sum_j \exp(z_j)}, \; k=1,\dots,K}$$
+    ![Pi Max Formula](pi_max_formula.png)
 
     So it displays the $\max\pi_k$ 
     ![Pi Max](pi_max_finetune_challenge2.png)
@@ -22,7 +22,7 @@ This is the visualization of the result of training model
 
     The formula is:
 
-    $$\eqalign{\mathcal{L}_{\text{entropy}} = -\sum_{k=1}^{K} \pi_k \log \pi_k \quad \text{where} \quad pi_k = \frac{\exp(z_k)}{\sum_j \exp(z_j)} \;\; k=1,\dots,K}$$
+    ![Entropy Formula](entropy_formula.png)
 
     ![Pi Entropy](pi_entropy_finetune_challenge2.png)
 
