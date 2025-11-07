@@ -1,5 +1,8 @@
 # 🧠 **EEG Foundation Challenge 2025: Cross-Task to Cross-Subject Decoding**
 
+
+![Alt Text](./images/EEG_Competition.png "EEG Challenge 2025 Overview")
+
 ---
 
 ## 🎯 **Overview: The Two Critical Challenges**
