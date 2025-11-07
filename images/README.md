@@ -18,6 +18,12 @@ This is the visualization of the result of training model
     So it displays the $\max\pi_k$ 
     ![Pi Max](pi_max_finetune_challenge2.png)
 
+    **The Cauchy-Schwarz Inequality**
+    ```math
+    \left( \sum_{k=1}^n a_k b_k \right)^2 \leq \left( \sum_{k=1}^n a_k^2 \right) \left( \sum_{k=1}^n b_k^2 \right)
+    ```
+
+
 - **Pi entropy:**
 
     The formula is:
