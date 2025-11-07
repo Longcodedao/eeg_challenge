@@ -59,8 +59,9 @@ To get started with the challenge, follow these two steps:
 
 1.  **Install Dependencies**:
     ```bash
-    pip install -r requirements.txt
+    pip install -r requirements.txt --no-build-isolation
     ```
+    Use no build isolation because Mamba may enters difficulties when building from source or installing from PyPi
 
 2.  **Download the Dataset**: Choose between the smaller, manageable "Mini" set or the complete "Full" dataset.
 

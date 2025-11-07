@@ -16,4 +16,4 @@ tensorboard
 eegdash
 braindecode
 lightning
-mamba-ssm
+mamba-ssm=2.2.4
