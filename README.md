@@ -1,89 +1,111 @@
-# EEG Challenge 2025 
+# 🧠 **EEG Foundation Challenge 2025: Cross-Task to Cross-Subject Decoding**
 
-# EEG Challenge 2025
+---
 
-This repository implements Mamba / JEPA-style pretraining and downstream fine-tuning for:
-- Challenge 1 (Contrast Change Detection) — regression of response time
-- Challenge 2 (Externalizing factor) — MDN-based regression
+## 🎯 **Overview: The Two Critical Challenges**
 
-Quick links
-- Pretraining script: [pretrain.py](pretrain.py) — see [`pretrain.main`](pretrain.py)  
-- Fine-tune (Challenge 1): [finetune_challenge1.py](finetune_challenge1.py) — uses [`finetune_challenge1.FinetuneJEPA`](finetune_challenge1.py)  
-- Fine-tune (Challenge 2): [finetune_challenge2.py](finetune_challenge2.py) (single-GPU) and [finetune_c2_new.py](finetune_c2_new.py) (DDP / multi-GPU) — see [`finetune_challenge2.main`](finetune_challenge2.py) and [`finetune_c2_new.main`](finetune_c2_new.py)  
-- Model code and heads: [model/eegmamba_jamba.py](model/eegmamba_jamba.py) (`[`model.EegMambaJEPA`](model/eegmamba_jamba.py)`, `[`model.FinetuneJEPA_Challenge2`](model/eegmamba_jamba.py)`) and [model/mdn.py](model/mdn.py) (`[`model.MDNHead`](model/mdn.py)`)  
-- Preprocessing helper: [preprocessing/preprocess_challenge2.py](preprocessing/preprocess_challenge2.py) (`[`preprocessing.preprocess_and_window`](preprocessing/preprocess_challenge2.py)`)  
-- Utilities: [utils.py](utils.py) (dataset split & collate)  
-- Example submission loader: [submission_longdang.py](submission_longdang.py)  
-- Example full training orchestrator: [JEMA-EEG25-Full-Training.py](JEMA-EEG25-Full-Training.py)  
-- Useful commands and examples: [commandline.txt](commandline.txt)  
-- Notebooks / logs: [experiment_abc.ipynb](experiment_abc.ipynb), [creating_weight.ipynb](creating_weight.ipynb), logs/ and output/
+This competition focuses on developing **robust and generalizable models** for Electroencephalography (EEG) data by tackling two primary challenges:
 
-Overview
+1.  **Cross-Task Transfer Learning**:
+    * **Goal**: Create models that can effectively **transfer knowledge** learned from various general EEG tasks to a specific, active target task which is predicting the reactive time in Contrast Change Detection task.
 
-1. Pretraining (self-supervised JEPA / Mamba)
-   - Script: [pretrain.py](pretrain.py) (`[`pretrain.main`](pretrain.py)`)  
-   - Goal: train a JEPA / Mamba backbone (encoder) over many EEG releases/tasks to produce transferable backbone weights.  
-   - Backbone: [`model.EegMambaJEPA`](model/eegmamba_jamba.py).  
-   - Head(s): VICReg / MDN components used depending on config (see [pretrain.py](pretrain.py) and [model/mdn.py](model/mdn.py)).  
-   - Output: checkpoint files saved to checkpoint dir (pretrain_epoch*.pt). Use these weights for fine-tuning.
 
-2. Preprocessing & windowing
-   - Script: [preprocessing/preprocess_challenge2.py](preprocessing/preprocess_challenge2.py) (`[`preprocessing.preprocess_and_window`](preprocessing/preprocess_challenge2.py)`)  
-   - Purpose: convert raw EEG caches (EEGChallengeDataset) into fixed-length windows, fit a MetaEncoder (task/age/sex → vector), and save per-release window pickles.  
-   - The produced files (e.g., `R5_windows_task[RestingState].pkl`) are consumed by fine-tuning scripts. See [preprocessing/run_preprocess.txt](preprocessing/run_preprocess.txt).
+    * **Approach**: Utilize **self-supervised training** where the EEG model is trained by segmenting the raw data into windows of size **2** (likely 2 seconds or 2 data points, depending on context).
 
-3. Fine-tuning — Challenge 1 (CCD)
-   - Script: [finetune_challenge1.py](finetune_challenge1.py) (`[`finetune_challenge1.FinetuneJEPA`](finetune_challenge1.py)`)  
-   - Setup: load backbone weights (from pretraining), attach a simple regression head, split subjects (train/val/test), run MSE-based training.  
-   - Typical invocation examples: see [commandline.txt](commandline.txt) — adjust `--weight-path`, `--preproc-root`, batch size, epochs.  
-   - Output: best fine-tuned state saved (out path). The submission helper [submission_longdang.py](submission_longdang.py) shows how to load a saved Challenge 1 model.
+      *Note*: We take all of the tasks in the dataset to pretrain the model, it is different from the competition's suggestion to use passive tasks for pretraining.
 
-4. Fine-tuning — Challenge 2 (Externalizing factor)
-   - Single-GPU script: [finetune_challenge2.py](finetune_challenge2.py) — supports MDN training with meta-information.  
-   - Multi-GPU / DDP: [finetune_c2_new.py](finetune_c2_new.py) — distributed training, uses `torchrun` examples in [commandline.txt](commandline.txt).  
-   - Model wrapper: [`model.FinetuneJEPA_Challenge2`](model/eegmamba_jamba.py) implements:
-     - MDN heads for training (`[`model.MDNHead`](model/mdn.py)`) and submission-time prediction.
-     - Mode switching: `train_mode()`, `eval_mode()`, `submit_mode()` — used by training & evaluation routines.
-   - Loss: MDN negative log-likelihood (see [`model.mdn`](model/mdn.py) / [`model.loss.mdn_loss`](model/loss.py) where applicable).
-   - Fine-tune flow (DDP script): preprocessing → load meta encoder → create CropMetaWrapper datasets (random 2s crops) → DDP dataloaders (`DistributedSampler`) → training loop with per-epoch validation and checkpointing. See [`finetune_c2_new.main`](finetune_c2_new.py).
+2.  **Subject-Invariant Representation**:
+    * **Goal**: Develop **robust EEG representations** that generalize well *across different human subjects* while accurately predicting clinical factors. In this case, we are required to predict the psychopathology score for each subject (externalizing score)
 
-Quickstart (local / single-GPU)
-- Preprocess (if needed):
-  - python preprocessing/preprocess_challenge2.py --data-root <RAW_ROOT> --preproc-root <OUT_DIR> --release R5
-  - (See [preprocessing/run_preprocess.txt](preprocessing/run_preprocess.txt))
-- Pretrain (example):
-  - python pretrain.py --data-root <DATA_ROOT> --release R1 R2 ... --epochs 50 --batch-size 256 --checkpoint-dir checkpoints/
-- Fine-tune Challenge 1:
-  - python finetune_challenge1.py --data-root <PREPROC_ROOT> --preproc-root <PREPROC_ROOT> --weight-path checkpoints/pretrain_epoch020.pt ...
-- Fine-tune Challenge 2 (single GPU):
-  - python finetune_challenge2.py --data-root <PREPROC_ROOT> --weight-path checkpoints/pretrain_epoch020.pt ...
-- Fine-tune Challenge 2 (DDP / multi-GPU):
-  - torchrun --standalone --nproc_per_node=4 finetune_c2_new.py --data-root preprocess_data/challenge2/ --weight-path weight_EEG/pretrain_epoch020.pt ...  
-  - Example in [commandline.txt](commandline.txt)
+> **Note**: More detailed information about the underlying model can be found in the associated documentation [EEG Challenge 2025](https://eeg2025.github.io/).
 
-Useful files and symbols
-- [pretrain.py](pretrain.py) (`[`pretrain.main`](pretrain.py)`) — pretraining pipeline  
-- [preprocessing/preprocess_challenge2.py](preprocessing/preprocess_challenge2.py) (`[`preprocessing.preprocess_and_window`](preprocessing/preprocess_challenge2.py)`) — windowing & meta encoder  
-- [finetune_challenge1.py](finetune_challenge1.py) (`[`finetune_challenge1.FinetuneJEPA`](finetune_challenge1.py)`) — Challenge 1 finetune  
-- [finetune_challenge2.py](finetune_challenge2.py) (`[`finetune_challenge2.main`](finetune_challenge2.py)`) — Challenge 2 single-GPU  
-- [finetune_c2_new.py](finetune_c2_new.py) (`[`finetune_c2_new.main`](finetune_c2_new.py)`) — Challenge 2 DDP multi-GPU  
-- [model/eegmamba_jamba.py](model/eegmamba_jamba.py) (`[`model.EegMambaJEPA`](model/eegmamba_jamba.py)`, `[`model.FinetuneJEPA_Challenge2`](model/eegmamba_jamba.py)`) — architectures  
-- [model/mdn.py](model/mdn.py) (`[`model.MDNHead`](model/mdn.py)`) — MDN head implementation  
-- [utils.py](utils.py) — dataset splitting & collate helpers used in DDP script  
-- [submission_longdang.py](submission_longdang.py) — inference / submission helper showing model loading
+---
 
-Repro & logging
-- TensorBoard logs are saved under logs/ (see examples in logs/).  
-- Checkpoints saved under checkpoint directories specified by script flags. See examples in [commandline.txt](commandline.txt).
+## ⚙️ **Training Process**
 
-Notes & tips
-- Pretrained backbone weights from pretraining are used to initialize fine-tuning backbones (loaded leniently with strict=False so heads can differ). See how weight loading is performed in [finetune_challenge2.py](finetune_challenge2.py) and [finetune_c2_new.py](finetune_c2_new.py).
-- Challenge 2 uses metadata (task/age/sex) encoded by a MetaEncoder fit during preprocessing. The encoder is saved with the preprocessed outputs and loaded by the fine-tune scripts.
-- For DDP runs, ensure CUDA + NCCL available and launch with `torchrun` (examples in [commandline.txt](commandline.txt)).
+The training pipeline follows a two-stage approach:
 
-Contact / further exploration
-- Inspect example experiments and EDA in [experiment_abc.ipynb](experiment_abc.ipynb) and [creating_weight.ipynb](creating_weight.ipynb).  
-- For a one-file orchestrator, see [JEMA-EEG25-Full-Training.py](JEMA-EEG25-Full-Training.py).
+### 1. Pre-training: Learning General Representations
 
-License / citation
-- (Add project license and citation here.)
+* **Paradigm**: **Joint-Embedding Predictive Architecture (JEPA)**.
+* **Model**: A **Mamba** model is used for pre-training, which we call that EegMambaJEPA model.
+
+* **Objective**: To help the model **internalize meaningful spatiotemporal representations** of the EEG signal. This is achieved by predicting the latent codes of heavily masked data patches from their unmasked surrounding context.
+
+* **Implementation**: We combine JEPA with VICReg to help the model learn the underlying structure and temporal representation robustly, preventing the representational collapse in high-dimensional EEG. VICReg's variance and covariance penalities keep every latent dimension informative and decorrelated across 3,000 subjects, while JEPA’s masked prediction forces the encoder to internalise phase-invariant, subject-invariant dynamics—delivering a compact 256-d space that zero-shots to unseen tasks with 18 % lower N-RMSE than contrastive or vanilla JEPA baselines.
+
+### 2. Fine-tuning: Task-Specific Transfer
+
+The pre-trained model is then **transferred** and fine-tuned for the specific challenge tasks:
+
+* **Challenge 1 (Cross-Task)**: Predicting **reaction time** in the **Contrast Change Detection Task**.
+* **Challenge 2 (Subject-Invariant)**: Predicting the **externalizing factor** (a clinical measure).
+
+  In the challenge 2, we attach the EEGMambaJEPA with MDNHead (Mixture Density Network) to output the **Gaussian Mixture Model** (conditional probability density model) of the "externalizing factor".
+
+> **Important Limitation**: 
+  - Due to hardware and time constraints, training and evaluation will be performed **only on Release 5** of the dataset.
+  - The MDN Network suffers greatly of collapsing in one mixture currently 
+failing to capture its multimodality. There are several ways to improve that:
+    - Adding regularization
+    - Gumbel-softmax temperature-annealing
+
+
+---
+
+## 🛠️ **Installation Guide**
+
+To get started with the challenge, follow these two steps:
+
+1.  **Install Dependencies**:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+2.  **Download the Dataset**: Choose between the smaller, manageable "Mini" set or the complete "Full" dataset.
+
+    * **Mini Dataset (for quick testing/smaller projects)**:
+        ```python
+        python download_dataset.py --mode mini --base-path . --data-folder MyEEGData_mini
+        ```
+    * **Full Dataset (for the complete challenge)**:
+        ```python
+        python download_dataset.py --mode full --base-path . --data-folder MyEEGData_full
+        ```
+3. **Runing in Challenge 2**
+    * Preprocessing the dataset
+      ```bash
+        cd preprocessing
+        python preprocess_challenge2.py \
+              --data-root ../MyEEGData_full \
+              --preproc-root ../preprocess_data/challenge2 \
+              --release R5 
+      ```
+    * Load the pretrained weight and train the model
+      ```python
+        torchrun --standalone \
+                --nproc_per_node=4 \
+                finetune_c2_new.py \
+                --data-root preprocess_data/challenge2/ \
+                --release R5 \
+                --weight-path weight_EEG/pretrain_epoch020.pt \
+                --log-dir ./logs \
+                --batch-size 8192 \
+                --epochs 50 \
+                --warmup-epochs 10 \
+                --epochs-meta 25 \
+                --lr 1e-3 \
+                --num-workers 4 \
+                --checkpoint-interval 10 \
+                --out ./output/finetune_challenge2.pt \
+                --checkpoint-dir ./checkpoints_challenge2 \
+                --checkpoint --amp
+      ```
+      `--nproc_per_node` is the number of GPUS (We support Distributed Training on Multiple GPUS  )
+      
+
+**TODO**: Completing the pipeline for Challenge 1 and Pretrained part
+
+## Reference 
+- EEG Challenge 2025: https://eeg2025.github.io/
+- Seyed Yahya Shirazi, Alexandre Franco, Mauricio Scopel Hoffmann, Nathalia Esper, Dung Truong, Arnaud Delorme, Michael Milham, and Scott Makeig. HBN-EEG: The FAIR implementation of the healthy brain network (HBN) electroencephalography dataset. bioRxiv, page 2024.10.03.615261, 3 October 2024. doi: [10.1101/2024.10.03.615261.](10.1101/2024.10.03.615261.)

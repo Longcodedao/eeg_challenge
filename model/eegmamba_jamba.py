@@ -183,6 +183,10 @@ class EegMambaJEPA(nn.Module):
         cls_tokens = self.cls_token.expand(B, -1, -1)  # (B, 1, d_model)
         return torch.cat((cls_tokens, x), dim=1)
 
+    def get_num_params(self):
+        total_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"Total trainable parameters in EegMambaJEPA: {total_params}")
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         x: (B, C, T)
