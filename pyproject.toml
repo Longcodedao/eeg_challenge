@@ -1,0 +1,43 @@
+[project]
+name = "eeg-code"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "braindecode>=1.2.0",
+    "eegdash>=0.4.1",
+    "jupyterlab>=4.5.0",
+    "lightning>=2.6.0",
+    "matplotlib>=3.10.7",
+    "mne>=1.11.0",
+    "notebook>=7.5.0",
+    "numpy>=2.3.5",
+    "pandas>=2.3.3",
+    "scikit-learn>=1.7.2",
+    "scipy>=1.16.3",
+    "seaborn>=0.13.2",
+    "setuptools>=80.9.0",
+    "tensorboard>=2.20.0",
+    "torch==2.6.0+cu124",
+    "torchvision==0.21.0+cu124",
+    "torchaudio==2.6.0+cu124",
+    "wheel>=0.45.1",
+    "mamba-ssm"
+]
+
+[[tool.uv.index]]
+name = "pytorch-cuda124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true 
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cuda124" }]
+torchvision = [{ index = "pytorch-cuda124" }]
+torchaudio = [{index = "pytorch-cuda124"}]
+# You do not need to add mamba-ssm here.
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.1.0",
+]

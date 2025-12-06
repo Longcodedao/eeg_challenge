@@ -42,3 +42,5 @@ preprocess_data/challenge2/*
 
 .venv/
 .venv/*
+
+uv.lock
