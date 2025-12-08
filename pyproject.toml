@@ -23,7 +23,7 @@ dependencies = [
     "torchvision==0.21.0+cu124",
     "torchaudio==2.6.0+cu124",
     "wheel>=0.45.1",
-    "mamba-ssm"
+    "mamba-ssm==2.2.4"
 ]
 
 [[tool.uv.index]]
